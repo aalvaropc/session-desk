@@ -41,7 +41,9 @@ class BackgroundTests(unittest.TestCase):
 
     def start_demo(self, *arguments):
         result = self.run_cli("start", "--demo", "--port", "0", *arguments)
-        self.assertEqual(result.returncode, 0, result.stderr)
+        log = self.root / "server.log"
+        detail = result.stderr + (log.read_text(encoding="utf-8") if log.exists() else "")
+        self.assertEqual(result.returncode, 0, detail)
         match = re.search(r"http://127\.0\.0\.1:\d+", result.stdout)
         self.assertIsNotNone(match, result.stdout)
         return result, match.group()
@@ -62,6 +64,8 @@ class BackgroundTests(unittest.TestCase):
         self.assertEqual(stopped.returncode, 0, stopped.stderr)
         self.assertIn("stopped", stopped.stdout.lower())
         self.assertFalse((self.root / "server.json").exists())
+        if os.name == "nt":
+            (self.root / "server.log").unlink()
         self.assertIn("not running", self.run_cli("status").stdout.lower())
         self.assertEqual(self.run_cli("stop").returncode, 0)
 

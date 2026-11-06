@@ -292,7 +292,37 @@ def stop() -> bool:
         while time.monotonic() < deadline:
             current = running_instance()
             if current is None or current.instance_id != instance.instance_id:
+                if os.name == "nt":
+                    _wait_for_windows_process(instance.pid, deadline - time.monotonic())
                 remove_instance(instance.instance_id)
                 return True
             time.sleep(0.05)
         raise RuntimeError("Session Desk is still shutting down; retry status shortly")
+
+
+def _wait_for_windows_process(pid: int, remaining: float) -> None:
+    import ctypes
+
+    kernel32 = getattr(ctypes, "WinDLL")("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = (ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong)
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.WaitForSingleObject.argtypes = (ctypes.c_void_p, ctypes.c_ulong)
+    kernel32.WaitForSingleObject.restype = ctypes.c_ulong
+    kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+    kernel32.CloseHandle.restype = ctypes.c_int
+    handle = kernel32.OpenProcess(0x00100000, 0, pid)
+    if not handle:
+        error = getattr(ctypes, "get_last_error")()
+        if error == 87:
+            return
+        raise OSError(error, "Could not wait for Session Desk to exit")
+    try:
+        result = kernel32.WaitForSingleObject(handle, max(0, int(remaining * 1000)))
+        if result == 0x102:
+            raise RuntimeError("Session Desk is still shutting down; retry status shortly")
+        if result != 0:
+            raise OSError(
+                getattr(ctypes, "get_last_error")(), "Could not wait for Session Desk to exit"
+            )
+    finally:
+        kernel32.CloseHandle(handle)
