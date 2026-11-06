@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import webbrowser
 from contextlib import ExitStack
 from pathlib import Path
@@ -84,6 +85,10 @@ def parse_settings(arguments: Optional[Sequence[str]] = None) -> Settings:
 
 
 def main(arguments: Optional[Sequence[str]] = None) -> None:
+    if os.environ.get("SESSION_DESK_DIAGNOSTIC") == "1":
+        import faulthandler
+
+        faulthandler.dump_traceback_later(5, repeat=True)
     settings = parse_settings(arguments)
     if settings.action:
         try:

@@ -22,6 +22,7 @@ class BackgroundTests(unittest.TestCase):
         self.environment = {
             **os.environ,
             "SESSION_DESK_STATE_DIR": str(self.root),
+            "SESSION_DESK_DIAGNOSTIC": "1",
             "PYTHONPATH": str(Path("src").resolve()),
         }
         self.command = [sys.executable, "-m", "session_desk.cli"]
