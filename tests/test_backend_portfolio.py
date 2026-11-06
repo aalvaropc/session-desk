@@ -196,7 +196,7 @@ class RecoveryPortfolioTests(unittest.TestCase):
             conn.execute(
                 "INSERT INTO threads VALUES (?, ?, ?, 0, NULL)", ("codex-one", str(path), "Title")
             )
-        row = next(row for row in self.store.scan() if row.file_path == str(duplicate))
+        row = next(row for row in self.store.scan() if Path(row.file_path) == duplicate.resolve())
         self.assertEqual(self.store.trash([row.id]).errors, [])
         self.assertTrue(path.exists())
         self.assertEqual(self.store.restore([self.store.list_trash()[0].id]).errors, [])

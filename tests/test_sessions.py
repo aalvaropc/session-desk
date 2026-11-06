@@ -283,10 +283,11 @@ class SessionTests(unittest.TestCase):
         store.trash([store.scan()[0].id])
         entry = store.list_trash()[0]
         real_exists = Path.exists
+        canonical_path = path.resolve()
 
         def create_after_check(candidate):
             exists = real_exists(candidate)
-            if candidate == path and not exists:
+            if candidate == canonical_path and not exists:
                 candidate.write_text("new concurrent session")
             return exists
 

@@ -145,7 +145,7 @@ def main(arguments: Optional[Sequence[str]] = None) -> None:
         settings.output.parent.mkdir(parents=True, exist_ok=True)
         settings.output.write_text(render_page(catalog, standalone=True), encoding="utf-8")
         print(
-            f"{len(catalog['sessions'])} sessions · {len(catalog['memories'])} memories → {settings.output}"
+            f"{len(catalog['sessions'])} sessions, {len(catalog['memories'])} memories: {settings.output}"
         )
         if settings.open_browser:
             webbrowser.open(settings.output.resolve().as_uri())

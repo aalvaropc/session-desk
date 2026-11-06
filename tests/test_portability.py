@@ -47,9 +47,10 @@ class PortabilityTests(unittest.TestCase):
         transcript, sidecar, artifact = self.sidecar_session()
         session = self.store.scan()[0]
         original_rename = Path.rename
+        canonical_sidecar = sidecar.resolve()
 
         def interrupted_rename(source, target):
-            if source == sidecar:
+            if source == canonical_sidecar:
                 raise KeyboardInterrupt
             return original_rename(source, target)
 
@@ -65,9 +66,10 @@ class PortabilityTests(unittest.TestCase):
         transcript, sidecar, artifact = self.sidecar_session()
         session = self.store.scan()[0]
         original_move = self.store._trash._move
+        canonical_sidecar = sidecar.resolve()
 
         def interrupted_move(source, destination):
-            if source == sidecar:
+            if source == canonical_sidecar:
                 destination.mkdir()
                 raise KeyboardInterrupt
             original_move(source, destination)
