@@ -5,6 +5,7 @@ import os
 import secrets
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from socketserver import TCPServer
 from typing import Any, Optional
 
 from .rendering import build_catalog, read_asset, render_page
@@ -12,6 +13,11 @@ from .sessions import SessionStore
 
 
 class PanelServer(ThreadingHTTPServer):
+    def server_bind(self) -> None:
+        TCPServer.server_bind(self)
+        self.server_name = "127.0.0.1"
+        self.server_port = self.server_address[1]
+
     def __init__(
         self,
         store: SessionStore,

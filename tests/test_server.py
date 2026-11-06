@@ -3,6 +3,7 @@ import json
 import socket
 import threading
 import unittest
+from unittest.mock import patch
 
 import test_sessions as fixtures
 from test_sessions import claude_session
@@ -11,6 +12,14 @@ from test_sessions import claude_session
 class ServerTests(unittest.TestCase):
     setUp = fixtures.SessionTests.setUp
     store = fixtures.SessionTests.store
+
+    def test_binding_loopback_does_not_require_name_resolution(self):
+        from session_desk.server import make_server
+
+        with patch("socket.getfqdn", side_effect=AssertionError("unexpected DNS lookup")):
+            server = make_server(self.store(), port=0)
+        self.addCleanup(server.server_close)
+        self.assertEqual(server.server_name, "127.0.0.1")
 
     def start_server(self):
         from session_desk.server import make_server
