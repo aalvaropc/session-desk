@@ -1,0 +1,20 @@
+{
+  "name": "session-desk-ui",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc --noEmit && node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test:e2e": "playwright test",
+    "test": "npm run typecheck && npm run test:e2e",
+    "test:unit": "node tests/frontend/state.test.mjs",
+    "format:check": "prettier --check frontend src/session_desk/web/index.html src/session_desk/web/styles.css scripts/*.mjs tests/frontend/*.mjs tests/e2e/*.ts playwright.config.ts"
+  },
+  "devDependencies": {
+    "@fontsource/ibm-plex-sans": "5.3.0",
+    "@playwright/test": "1.65.0",
+    "esbuild": "0.28.2",
+    "prettier": "3.9.10",
+    "typescript": "7.0.2"
+  }
+}
