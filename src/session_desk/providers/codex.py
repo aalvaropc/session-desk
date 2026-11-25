@@ -5,6 +5,29 @@ import datetime
 from pathlib import Path
 
 
+def load_codex_messages(path):
+    """Return the complete readable conversation, without the catalog's preview limits."""
+    from .common import readable, records, text_content
+
+    messages, events = [], []
+    for obj in records(Path(path)):
+        payload = obj.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        typ = obj.get("type")
+        if typ == "response_item" and payload.get("type") == "message":
+            role = payload.get("role")
+            text = text_content(payload.get("content")).strip()
+            if role in ("user", "assistant") and readable(text):
+                messages.append({"role": role, "text": text.replace("\r", "")})
+        elif typ == "event_msg" and payload.get("type") in ("user_message", "agent_message"):
+            text = payload.get("message")
+            if isinstance(text, str) and readable(text):
+                role = "user" if payload["type"] == "user_message" else "assistant"
+                events.append({"role": role, "text": text.strip().replace("\r", "")})
+    return messages or events
+
+
 def extract_codex(path, grep=None):
     from .common import readable, records, snippet, text_content
 

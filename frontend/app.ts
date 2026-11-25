@@ -1,6 +1,7 @@
 import { workspaceMarkup } from "./views.js";
 import type {
   Bootstrap,
+  ChatMessage,
   Filters,
   Language,
   Memory,
@@ -82,6 +83,8 @@ let busy = false;
 let notice = "";
 let error = "";
 let copied = false;
+let conversations: Record<string, ChatMessage[]> = {};
+let loadingConversation = "";
 const demoRemoved = new Map<string, Session | Memory>();
 const t = (key: TextKey): string => translate(language, key);
 const referenceTime = (): number =>
@@ -156,6 +159,8 @@ function render(): void {
     notice,
     error,
     copied,
+    conversations,
+    loadingConversation,
     items,
   });
   const all = root.querySelector<HTMLInputElement>("#select-all");
@@ -206,6 +211,27 @@ function openItem(id: string): void {
   detailTab = "conversation";
   render();
   root.querySelector(".detail-content")?.scrollTo(0, 0);
+  void loadConversation(id);
+}
+async function loadConversation(id: string): Promise<void> {
+  if (
+    catalog.mode !== "local" ||
+    id in conversations ||
+    !catalog.sessions.some((session) => session.id === id)
+  )
+    return;
+  loadingConversation = id;
+  render();
+  try {
+    const result = (await api(
+      `/api/sessions/${encodeURIComponent(id)}/messages`,
+    )) as { messages?: ChatMessage[] };
+    if (Array.isArray(result.messages)) conversations[id] = result.messages;
+  } catch {
+    // The preview from the catalog stays visible if the full text can't be read.
+  }
+  if (loadingConversation === id) loadingConversation = "";
+  render();
 }
 async function api(path: string, body?: unknown): Promise<unknown> {
   if (catalog.mode !== "local") throw new Error(t("readOnly"));
@@ -233,6 +259,8 @@ async function refresh(): Promise<void> {
   )
     throw new Error(t("requestFailed"));
   catalog = value;
+  conversations = {};
+  if (detailId) void loadConversation(detailId);
 }
 async function mutate(kind: "trash" | "restore", ids: string[]): Promise<void> {
   if (busy || catalog.mode === "static" || !ids.length) return;
@@ -475,3 +503,4 @@ document.addEventListener("keydown", (event) => {
   }
 });
 render();
+if (detailId) void loadConversation(detailId);

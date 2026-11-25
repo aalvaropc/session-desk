@@ -43,6 +43,9 @@ class SessionStore:
     def memories(self) -> list[Memory]:
         return self._catalog.memories()
 
+    def messages(self, identifier: str) -> list[dict]:
+        return self._catalog.messages(identifier)
+
     def trash(
         self,
         ids: Sequence[str],

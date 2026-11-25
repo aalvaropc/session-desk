@@ -2,6 +2,10 @@ export type Provider = "claude" | "codex";
 export type Review = "keep" | "pending";
 export type View = "sessions" | "memories" | "trash";
 export type Language = "en" | "es";
+export interface ChatMessage {
+  role: "user" | "assistant";
+  text: string;
+}
 export interface Session {
   id: string;
   session_id: string;
@@ -16,7 +20,7 @@ export interface Session {
   size_bytes: number;
   message_count: number;
   prompt_count: number;
-  messages: { role: "user" | "assistant"; text: string }[];
+  messages: ChatMessage[];
   match: string;
   version: string;
 }

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -121,6 +122,13 @@ class PanelHandler(BaseHTTPRequestHandler):
                 self.reply(200, self.server.catalog())
             elif self.path == "/api/trash":
                 self.reply(200, [entry.to_dict() for entry in self.server.store.list_trash()])
+            elif match := re.fullmatch(r"/api/sessions/([a-z]+:[0-9a-f]{64})/messages", self.path):
+                try:
+                    self.reply(200, {"messages": self.server.store.messages(match.group(1))})
+                except KeyError:
+                    self.reply(404, {"error": "Session not found", "code": "not_found"})
+                except (OSError, ValueError):
+                    self.reply(500, {"error": "Conversation could not be read"})
             else:
                 self.reply(404, {"error": "Route not found"})
 

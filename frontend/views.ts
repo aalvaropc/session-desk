@@ -1,5 +1,6 @@
 import type {
   Bootstrap,
+  ChatMessage,
   Filters,
   Language,
   Memory,
@@ -36,6 +37,8 @@ export interface ViewState {
   notice: string;
   error: string;
   copied: boolean;
+  conversations: Record<string, ChatMessage[]>;
+  loadingConversation: string;
   items: (Session | Memory | TrashEntry)[];
 }
 
@@ -56,6 +59,8 @@ export function workspaceMarkup(state: ViewState): string {
     notice,
     error,
     copied,
+    conversations,
+    loadingConversation,
     items,
   } = state;
   const t = (key: TextKey): string => translate(language, key);
@@ -184,13 +189,15 @@ export function workspaceMarkup(state: ViewState): string {
   function sessionDetail(session: Session): string {
     return `<div class="detail-title">${providerBadge(session.provider)}<h2>${esc(sessionTitle(session))}</h2><div class="detail-meta"><span>${icon("folder")}${esc(basename(session.project_path))}</span>${session.branch ? `<span>${icon("branch")}${esc(session.branch)}</span>` : ""}</div></div><div class="resume-box"><div><h3>${t("resume")}</h3><p>${t("commandHint")}</p></div>${button("copy", t(copied ? "copied" : "copyCommand"), copied ? "check" : "copy", `class="primary" ${test("copy-command")}`)}<code class="resume-command">${esc(commandFor(session))}</code></div><div class="detail-tabs" role="tablist" aria-label="${t("details")}">${(["conversation", "details"] as const).map((tab) => button(`tab-${tab}`, t(tab), undefined, `role="tab" id="tab-${tab}" aria-selected="${detailTab === tab}" aria-controls="tab-content" tabindex="${detailTab === tab ? 0 : -1}" class="${detailTab === tab ? "active" : ""}"`)).join("")}<span>${session.message_count} ${t("messages")}</span></div><div class="detail-content" id="tab-content" role="tabpanel" aria-labelledby="tab-${detailTab}" tabindex="0">${
       detailTab === "conversation"
-        ? session.messages.length
-          ? session.messages
+        ? (conversations[session.id] ?? session.messages).length
+          ? `${loadingConversation === session.id ? `<p class="muted" role="status">${t("loadingConversation")}</p>` : ""}${(
+              conversations[session.id] ?? session.messages
+            )
               .map(
                 (message, index) =>
                   `<article class="message message-${message.role}"><header><span class="speaker-symbol">${message.role === "user" ? icon("terminal") : icon("pages")}</span><strong>${message.role === "user" ? t("you") : providerLabel(session.provider)}</strong><span class="message-number">${String(index + 1).padStart(2, "0")}</span></header><div class="message-text">${esc(message.text)}</div></article>`,
               )
-              .join("")
+              .join("")}`
           : `<p class="muted">${t("noMessages")}</p>`
         : metadata([
             ["provider", providerLabel(session.provider)],

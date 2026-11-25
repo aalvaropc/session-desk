@@ -94,6 +94,23 @@ def extract(path: str, hist: dict, grep: str | None = None) -> dict:
     }
 
 
+def load_messages(path: str) -> list[dict]:
+    """Return the complete readable conversation, without the catalog's preview limits."""
+    from .common import readable, records, text_content
+
+    result = []
+    for obj in records(path):
+        typ = obj.get("type")
+        if typ not in ("user", "assistant"):
+            continue
+        message = obj.get("message")
+        txt = text_content(message.get("content")) if isinstance(message, dict) else ""
+        txt = txt.strip()
+        if readable(txt):
+            result.append({"role": typ, "text": txt.replace("\r", "")})
+    return result
+
+
 def parse_frontmatter(text: str) -> tuple[dict, str]:
     if not text.startswith("---"):
         return {}, text

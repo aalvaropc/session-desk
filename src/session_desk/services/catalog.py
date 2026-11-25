@@ -103,6 +103,19 @@ class Catalog:
         self.state.index_paths = index_paths
         return sorted(rows, key=lambda row: row.timestamp, reverse=True)
 
+    def messages(self, identifier: str) -> list[dict]:
+        from ..providers.claude import load_messages
+        from ..providers.codex import load_codex_messages
+
+        row = self.state.registry.get(identifier)
+        if not isinstance(row, Session):
+            raise KeyError(identifier)
+        path = Path(row.file_path)
+        self.state.safe(path, self.state.roots[row.provider])
+        if row.provider == "claude":
+            return load_messages(str(path))
+        return load_codex_messages(path)
+
     def memories(self) -> list[Memory]:
         from ..providers.claude import extract_memory
 
