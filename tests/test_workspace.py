@@ -14,6 +14,7 @@ class WorkspaceTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
+        self.project = self.root / "sample project"
         self.agy = self.root / "gemini"
         self.store = SessionStore(self.root / "claude", self.root / "codex", self.agy)
 
@@ -29,7 +30,13 @@ class WorkspaceTests(unittest.TestCase):
             )
             db.execute(
                 "INSERT INTO conversation_summaries VALUES (?, ?, ?, ?, ?)",
-                (native_id, "Synthetic title", None, '["file:///sample"]', "2026-11-27T12:00:00Z"),
+                (
+                    native_id,
+                    "Synthetic title",
+                    None,
+                    json.dumps([self.project.as_uri()]),
+                    "2026-11-27T12:00:00Z",
+                ),
             )
         path = logs / "transcript_full.jsonl"
         if transcript:
@@ -57,7 +64,7 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(set(by_variant), {"cli", "app", "ide"})
         self.assertEqual(len({session.id for session in by_variant.values()}), 3)
         cli = by_variant["cli"]
-        self.assertEqual(cli.project_path, "/sample")
+        self.assertEqual(Path(cli.project_path), self.project)
         self.assertEqual(self.store.messages(cli.id)[-1]["text"], "Two words/middle")
         self.assertFalse(by_variant["ide"].has_transcript)
         before = path.read_bytes()
