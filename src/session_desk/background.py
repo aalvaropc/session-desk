@@ -50,6 +50,11 @@ def state_directory() -> Path:
 def configuration(settings: Settings) -> dict[str, Any]:
     return {
         "demo": settings.demo,
+        "antigravity_home": (
+            str(Path(settings.antigravity_home or Path.home() / ".gemini").expanduser().resolve())
+            if not settings.demo
+            else None
+        ),
         "port": settings.port,
         "project": settings.project,
         "search": settings.search,
@@ -164,14 +169,14 @@ def remove_instance(instance_id: str) -> None:
 
 
 @contextmanager
-def launch_lock() -> Iterator[None]:
-    directory = state_directory()
-    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-    descriptor = os.open(directory / "launch.lock", os.O_RDWR | os.O_CREAT, 0o600)
+def launch_lock(path: Optional[Path] = None, timeout: float = 15) -> Iterator[None]:
+    lock_path = path if path is not None else state_directory() / "launch.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
     with os.fdopen(descriptor, "r+b", buffering=0) as handle:
         if os.fstat(handle.fileno()).st_size == 0:
             handle.write(b"0")
-        deadline = time.monotonic() + 15
+        deadline = time.monotonic() + timeout
         while True:
             try:
                 if sys.platform == "win32":
@@ -222,6 +227,7 @@ def child_arguments(settings: Settings, instance_id: str) -> list[str]:
         ("--grep", settings.search),
         ("--claude-home", settings.claude_home),
         ("--codex-home", settings.codex_home),
+        ("--antigravity-home", settings.antigravity_home),
     ):
         if value is not None:
             arguments.extend((name, value))

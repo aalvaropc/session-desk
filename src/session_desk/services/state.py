@@ -8,8 +8,9 @@ from ..models import ScanWarning
 
 
 class StoreState:
-    def __init__(self, claude_home=None, codex_home=None):
+    def __init__(self, claude_home=None, codex_home=None, antigravity_home=None):
         self.roots = {
+            "antigravity": Path(antigravity_home or Path.home() / ".gemini").expanduser().resolve(),
             "claude": Path(claude_home or Path.home() / ".claude").expanduser().resolve(),
             "codex": Path(codex_home or os.environ.get("CODEX_HOME") or Path.home() / ".codex")
             .expanduser()

@@ -14,7 +14,7 @@ class PortfolioBackendTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         self.claude = self.root / "claude"
-        self.store = SessionStore(self.claude, self.root / "codex")
+        self.store = SessionStore(self.claude, self.root / "codex", self.root / "gemini")
 
     def test_duplicate_native_ids_are_distinct(self):
         claude_session(self.claude, "same")

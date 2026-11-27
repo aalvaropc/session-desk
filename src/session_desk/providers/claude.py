@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import collections
 import datetime
-import json
 import os
+
+from ..models import Message
+from .common import timestamp
 
 
 def load_history(path=None) -> dict:
@@ -11,18 +13,12 @@ def load_history(path=None) -> dict:
     path = path or ""
     if not os.path.exists(path):
         return hist
-    with open(path, encoding="utf-8", errors="replace") as f:
-        for line in f:
-            try:
-                obj = json.loads(line)
-            except Exception:
-                continue
-            if not isinstance(obj, dict):
-                continue
-            sid, disp = obj.get("sessionId"), obj.get("display")
-            if isinstance(sid, str) and isinstance(disp, str) and disp.strip():
-                disp = disp.strip()
-                hist.setdefault(sid, []).append(disp)
+    from .common import records
+
+    for obj in records(path):
+        sid, disp = obj.get("sessionId"), obj.get("display")
+        if isinstance(sid, str) and isinstance(disp, str) and disp.strip():
+            hist.setdefault(sid, []).append(disp.strip())
     return hist
 
 
@@ -31,6 +27,7 @@ def extract(path: str, hist: dict, grep: str | None = None) -> dict:
     st = os.stat(path)
     title = first = cwd = branch = None
     n_msgs = 0
+    activity = 0.0
     match = None
     needle = grep.lower() if grep else None
     tail: collections.deque[dict] = collections.deque(maxlen=150)
@@ -40,6 +37,7 @@ def extract(path: str, hist: dict, grep: str | None = None) -> dict:
         typ = obj.get("type")
         if typ in ("user", "assistant"):
             n_msgs += 1
+            activity = max(activity, timestamp(obj.get("timestamp")))
             tail.append(obj)
             message = obj.get("message")
             txt = text_content(message.get("content")) if isinstance(message, dict) else ""
@@ -82,6 +80,7 @@ def extract(path: str, hist: dict, grep: str | None = None) -> dict:
         "file": path,
         "proj": cwd or os.path.basename(os.path.dirname(path)),
         "date": datetime.datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M"),
+        "activity": activity,
         "ts": int(st.st_mtime),
         "kb": st.st_size // 1024,
         "msgs": n_msgs,
@@ -92,6 +91,23 @@ def extract(path: str, hist: dict, grep: str | None = None) -> dict:
         "last": msgs[-10:],
         "match": match or "",
     }
+
+
+def load_messages(path: str) -> list[Message]:
+    """Return the complete readable conversation, without the catalog's preview limits."""
+    from .common import readable, records, text_content
+
+    result: list[Message] = []
+    for obj in records(path):
+        typ = obj.get("type")
+        if typ not in ("user", "assistant"):
+            continue
+        message = obj.get("message")
+        txt = text_content(message.get("content")) if isinstance(message, dict) else ""
+        txt = txt.strip()
+        if readable(txt):
+            result.append({"role": typ, "text": txt.replace("\r", "")})
+    return result
 
 
 def parse_frontmatter(text: str) -> tuple[dict, str]:

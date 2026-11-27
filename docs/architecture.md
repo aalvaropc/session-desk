@@ -1,7 +1,8 @@
 # Architecture
 
 Session Desk runs on loopback and reads provider files directly. There is no hosted
-backend, account, telemetry endpoint or runtime database of its own. The Python package
+backend, account or telemetry endpoint. A private per-workspace SQLite database
+holds a rebuildable search index and user-authored reviews and notes. The Python package
 contains the compiled interface, fonts and license, so installing a wheel needs no Node.
 
 ## Responsibilities
@@ -10,9 +11,10 @@ contains the compiled interface, fonts and license, so installing a wheel needs 
 - `background.py` manages a detached instance, private runtime state, launch locking and authenticated status/shutdown.
 - `config.py` is the immutable launch configuration.
 - `models.py` defines the session, memory, warning, trash and operation-result boundaries.
-- `providers/claude.py` and `providers/codex.py` normalize provider transcript formats.
+- The Claude, Codex and Antigravity adapters normalize provider transcript formats.
 - `providers/codex_index.py` owns the optional versioned Codex SQLite index.
-- `services/catalog.py` discovers files and reuses unchanged transcript snapshots.
+- `services/catalog.py` discovers files and reuses unchanged transcript metadata.
+- `services/workspace.py` synchronizes the message index and serves paginated search, reviews, notes and activity.
 - `services/state.py` owns roots, identities, fingerprints and scan warnings.
 - `services/trash.py` journals reversible filesystem moves and recovery.
 - `sessions.py` composes the catalog and trash behind a small facade.
@@ -31,13 +33,14 @@ using the old `proj`, `msgs` and `kb` abbreviations.
 
 ```mermaid
 flowchart LR
-    Files[Claude / Codex files] --> Providers[Provider adapters]
+    Files[Claude / Codex / Antigravity files] --> Providers[Provider adapters]
     Providers --> Catalog[Cached catalog]
     Catalog --> Models[Typed models]
-    Models --> HTTP[Local HTTP / static renderer]
+    Models --> Index[Local SQLite index]
+    Index --> HTTP[Local HTTP / static renderer]
     HTTP --> UI[TypeScript workbench]
     UI --> Trash[Journaled trash service]
-    Trash --> Files
+    Trash --> Originals[Claude / Codex files]
 ```
 
 ## Recovery
@@ -62,21 +65,31 @@ changed destinations and invalid manifests using temporary directories.
 
 ## Browser state and distribution
 
-Review preferences have a versioned, validated local-storage schema. Filters discard
-hidden active/selected items. Global shortcuts exclude interactive controls, preserving
-native Space/Enter behavior. Detail and selection are separate states.
+The live HTML starts with configuration. It loads a bounded session page and a separate message page. Search returns one match
+per session with a message position for navigation. Browser state tracks session
+version and request identity; navigation uses stable catalog IDs. Existing review
+preferences migrate from browser storage to the workspace database. Filters
+discard hidden selections before bulk actions.
 
-Live mode serves a JSON catalog and whitelisted packaged assets. Static export embeds
-the catalog, CSS, fonts and bundled JavaScript. Real-data static exports are read-only.
-Demo exports use only synthetic data and simulate removal/recovery in browser memory.
-The frontend build is a development step; the installed application is self-contained.
+Static export embeds the catalog previews, CSS, fonts and bundled JavaScript.
+Real-data static exports are read-only. Demo exports use synthetic data and simulate
+changes in browser memory. The frontend build is a development step.
 
-## Tradeoffs
+## Local index and provider boundaries
 
-A transcript's readable preview is intentionally bounded; the full conversation remains
-with the provider. Full-text CLI filtering scans message text when requested. The cache
-is per process and invalidated by the file fingerprint, avoiding another persistent
-index that could drift from the provider's files.
+SQLite indexes readable text when the workspace refreshes. File fingerprints detect
+changes and a transaction keeps entries synchronized after recoverable trash and
+restore. Connections with FTS5 trigram use it to narrow literal substring searches;
+other builds evaluate the same literal query directly. The workspace key uses the
+three configured roots. Use reindex to rebuild messages while preserving reviews and
+notes. A note retains a source fingerprint so a changed message at the same position
+doesn't silently become its new source.
+
+Antigravity identity combines the source variant and native conversation UUID.
+Recognized JSONL wins over an opaque native store. The workspace can list Antigravity
+metadata even where readable text isn't available. Its adapter reads provider files
+without moving or rewriting them. If a vendor summary database has uncheckpointed
+WAL entries, those metadata updates become visible after the provider checkpoints.
 
 The application manages transcripts and their sidecars, not secure erasure. Shared
 provider history, caches and project files are retained. Provider-specific memory index

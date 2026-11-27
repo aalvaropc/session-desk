@@ -19,3 +19,4 @@ class Settings:
     search: Optional[str] = None
     claude_home: Optional[str] = None
     codex_home: Optional[str] = None
+    antigravity_home: Optional[str] = None

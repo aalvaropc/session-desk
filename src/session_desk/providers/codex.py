@@ -4,6 +4,33 @@ import collections
 import datetime
 from pathlib import Path
 
+from ..models import Message
+from .common import timestamp
+
+
+def load_codex_messages(path) -> list[Message]:
+    """Return the complete readable conversation, without the catalog's preview limits."""
+    from .common import readable, records, text_content
+
+    messages: list[Message] = []
+    events: list[Message] = []
+    for obj in records(Path(path)):
+        payload = obj.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        typ = obj.get("type")
+        if typ == "response_item" and payload.get("type") == "message":
+            role = payload.get("role")
+            text = text_content(payload.get("content")).strip()
+            if role in ("user", "assistant") and readable(text):
+                messages.append({"role": role, "text": text.replace("\r", "")})
+        elif typ == "event_msg" and payload.get("type") in ("user_message", "agent_message"):
+            text = payload.get("message")
+            if isinstance(text, str) and readable(text):
+                role = "user" if payload["type"] == "user_message" else "assistant"
+                events.append({"role": role, "text": text.strip().replace("\r", "")})
+    return messages or events
+
 
 def extract_codex(path, grep=None):
     from .common import readable, records, snippet, text_content
@@ -14,6 +41,7 @@ def extract_codex(path, grep=None):
     events: collections.deque[dict[str, str]] = collections.deque(maxlen=10)
     first = event_first = match = event_match = ""
     count = event_count = 0
+    activity = 0.0
     for obj in records(path):
         payload = obj.get("payload")
         if not isinstance(payload, dict):
@@ -27,6 +55,7 @@ def extract_codex(path, grep=None):
             if role not in ("user", "assistant") or not readable(text):
                 continue
             count += 1
+            activity = max(activity, timestamp(obj.get("timestamp")))
             if role == "user" and not first:
                 first = text
             messages.append({"r": "u" if role == "user" else "a", "t": text[:600]})
@@ -38,6 +67,7 @@ def extract_codex(path, grep=None):
                 continue
             role = "u" if payload["type"] == "user_message" else "a"
             event_count += 1
+            activity = max(activity, timestamp(obj.get("timestamp")))
             if role == "u" and not event_first:
                 event_first = text
             events.append({"r": role, "t": text[:600]})
@@ -58,6 +88,7 @@ def extract_codex(path, grep=None):
         "proj": meta.get("cwd") or "(sin proyecto)",
         "branch": git.get("branch") or "",
         "date": datetime.datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M"),
+        "activity": activity,
         "ts": int(st.st_mtime),
         "kb": st.st_size // 1024,
         "msgs": count or event_count,

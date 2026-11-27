@@ -34,11 +34,14 @@ class Session(Serializable):
     updated_at: str
     timestamp: int
     size_bytes: int
-    message_count: int
-    prompt_count: int
+    message_count: Optional[int]
+    prompt_count: Optional[int]
     messages: List[Message]
     match: str
     version: str
+    variant: Optional[str] = None
+    has_transcript: bool = True
+    activity_source: str = "file"
 
 
 @dataclass

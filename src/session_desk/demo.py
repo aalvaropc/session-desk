@@ -241,4 +241,39 @@ def demo_store() -> Iterator[SessionStore]:
             )
             timestamp = now - age * 86400
             os.utime(path, (timestamp, timestamp))
-        yield SessionStore(claude_root, codex_root)
+        antigravity_home = claude_root.parent / "gemini"
+        for index, (variant, title) in enumerate(
+            (
+                ("antigravity-cli", "Trace a CLI command"),
+                ("antigravity", "Review a desktop conversation"),
+                ("antigravity-ide", "Check editor changes"),
+            ),
+            start=1,
+        ):
+            sid = f"b0000000-0000-0000-0000-{index:012d}"
+            transcript = (
+                antigravity_home
+                / variant
+                / "brain"
+                / sid
+                / ".system_generated"
+                / "logs"
+                / "transcript_full.jsonl"
+            )
+            write_records(
+                transcript,
+                [
+                    {"type": "USER_INPUT", "content": title},
+                    {
+                        "type": "PLANNER_RESPONSE",
+                        "content": "The synthetic shared run found a missing check.",
+                    },
+                    {"type": "USER_INPUT", "content": f"Keep the {variant} decision traceable."},
+                    {
+                        "type": "PLANNER_RESPONSE",
+                        "content": "Review the same check before resuming.",
+                    },
+                ],
+                now - (index + 14) * 86400,
+            )
+        yield SessionStore(claude_root, codex_root, antigravity_home)

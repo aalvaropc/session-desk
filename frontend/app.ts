@@ -1,11 +1,17 @@
 import { workspaceMarkup } from "./views.js";
 import type {
   Bootstrap,
+  ActivityGroup,
+  ConversationPage,
+  ConversationState,
   Filters,
   Language,
   Memory,
+  Note,
+  NoteDraft,
   Review,
   Session,
+  SessionPage,
   TrashEntry,
   View,
 } from "./types.js";
@@ -20,6 +26,12 @@ import {
   commandFor,
 } from "./state.js";
 import { translate, type TextKey } from "./i18n.js";
+import {
+  contextMarkdown,
+  embeddedConversation,
+  localActivity,
+  noteMarkdown,
+} from "./analysis.js";
 
 const root = document.querySelector<HTMLDivElement>("#app")!;
 let bootstrap: Bootstrap;
@@ -82,6 +94,20 @@ let busy = false;
 let notice = "";
 let error = "";
 let copied = false;
+let sessionPage: SessionPage | undefined;
+let pageOffset = 0;
+let listPending = !!catalog.paged;
+let listRequest = 0;
+let searchTimer: number | undefined;
+let activeSession: Session | undefined;
+let conversation: ConversationState | undefined;
+let targetMessage: number | undefined;
+let sessionRequest = 0;
+let activity: ActivityGroup[] = [];
+let activityDays = 7;
+let activityRequest = 0;
+let noteDraft: NoteDraft | undefined;
+const conversationCache = new Map<string, ConversationPage>();
 const demoRemoved = new Map<string, Session | Memory>();
 const t = (key: TextKey): string => translate(language, key);
 const referenceTime = (): number =>
@@ -92,8 +118,11 @@ const referenceTime = (): number =>
 const isStale = (memory: Memory): boolean => stale(memory, referenceTime());
 function visibleItems(): (Session | Memory | TrashEntry)[] {
   if (view === "sessions")
-    return filterSessions(catalog.sessions, filters, reviews);
+    return catalog.paged
+      ? catalog.sessions
+      : filterSessions(catalog.sessions, filters, reviews);
   const query = filters.query.toLocaleLowerCase().trim();
+  if (view === "activity") return [];
   if (view === "trash")
     return catalog.trash
       .filter((item) =>
@@ -120,6 +149,11 @@ function visibleItems(): (Session | Memory | TrashEntry)[] {
     );
 }
 function render(): void {
+  if (noteDraft && root.querySelector<HTMLDialogElement>("#note-dialog")?.open)
+    return;
+  const previousContext = root.querySelector<HTMLDetailsElement>(
+    ".session-context[open]",
+  )?.dataset.session;
   const active = document.activeElement as HTMLInputElement | null;
   const focusId = active?.id;
   const focusTest = active?.dataset.testid;
@@ -134,7 +168,11 @@ function render(): void {
   const detailScroll = root.querySelector(".detail-content")?.scrollTop ?? 0;
   const items = visibleItems();
   selected = visibleSelection(selected, items);
-  if (detailId && !items.some((item) => item.id === detailId)) {
+  if (
+    detailId &&
+    activeSession?.id !== detailId &&
+    !items.some((item) => item.id === detailId)
+  ) {
     detailId = "";
     mobileDetail = false;
   }
@@ -156,11 +194,25 @@ function render(): void {
     notice,
     error,
     copied,
+    activeSession,
+    conversation,
+    targetMessage,
+    sessionPage,
+    pageOffset,
+    listPending,
+    activity,
+    activityDays,
+    noteDraft,
     items,
   });
+  if (previousContext && previousContext === detailId) {
+    const context = root.querySelector<HTMLDetailsElement>(".session-context");
+    if (context) context.open = true;
+  }
   const all = root.querySelector<HTMLInputElement>("#select-all");
   if (all)
-    all.indeterminate = selected.size > 0 && selected.size < items.length;
+    all.indeterminate =
+      selected.size > 0 && selected.size < selectableItems().length;
   const focusTarget = focusId
     ? document.getElementById(focusId)
     : focusOpen
@@ -188,6 +240,9 @@ function render(): void {
   const detailElement = root.querySelector(".detail-content");
   if (detailElement) detailElement.scrollTop = detailScroll;
 }
+function selectableItems(): (Session | Memory | TrashEntry)[] {
+  return visibleItems().filter((item) => item.provider !== "antigravity");
+}
 function clearFilters(): void {
   filters = {
     ...filters,
@@ -199,13 +254,256 @@ function clearFilters(): void {
   age = "all";
   selected.clear();
 }
-function openItem(id: string): void {
+function closeDetail(): void {
+  sessionRequest++;
+  activeSession = undefined;
+  conversation = undefined;
+  targetMessage = undefined;
+  detailId = "";
+  mobileDetail = false;
+}
+function openItem(id: string, position?: number): void {
+  const request = ++sessionRequest;
   detailId = id;
   mobileDetail = true;
   copied = false;
   detailTab = "conversation";
+  activeSession =
+    view === "sessions"
+      ? catalog.sessions.find((item) => item.id === id)
+      : undefined;
+  conversation = undefined;
+  targetMessage = position ?? activeSession?.hit?.position;
   render();
   root.querySelector(".detail-content")?.scrollTo(0, 0);
+  if (view !== "sessions") return;
+  if (activeSession) {
+    void loadConversation();
+  } else if (catalog.paged) {
+    void api(`/api/sessions/${encodeURIComponent(id)}`)
+      .then((result) => {
+        if (request !== sessionRequest) return;
+        detailId = id;
+        activeSession = result as Session;
+        mobileDetail = true;
+        if (activeSession.review) reviews[id] = activeSession.review;
+        void loadConversation();
+      })
+      .catch((failure: unknown) => {
+        if (request === sessionRequest) showError(failure);
+      });
+  }
+}
+function scrollToMessage(): void {
+  if (targetMessage === undefined) return;
+  const message = root.querySelector<HTMLElement>(
+    `[data-position="${targetMessage}"]`,
+  );
+  message?.scrollIntoView({ block: "nearest" });
+  if (message && document.activeElement?.closest(".detail-panel"))
+    message.focus({ preventScroll: true });
+}
+function cacheConversation(key: string, page: ConversationPage): void {
+  if (conversationCache.size >= 12) {
+    const oldest = conversationCache.keys().next().value;
+    if (oldest) conversationCache.delete(oldest);
+  }
+  conversationCache.set(key, page);
+}
+async function loadConversation(
+  offset = Math.floor((targetMessage ?? 0) / 40) * 40,
+): Promise<void> {
+  const session = activeSession;
+  if (!session) return;
+  const current: ConversationState = {
+    id: session.id,
+    version: session.version,
+    offset,
+    loading: false,
+    failed: false,
+  };
+  conversation = current;
+  if (!catalog.paged || session.has_transcript === false) {
+    current.page = embeddedConversation(session);
+    render();
+    scrollToMessage();
+    return;
+  }
+  const key = `${session.id}/${session.version}/${offset}`;
+  current.page = conversationCache.get(key);
+  if (current.page) {
+    render();
+    scrollToMessage();
+    return;
+  }
+  current.loading = true;
+  render();
+  try {
+    const params = new URLSearchParams({
+      offset: String(offset),
+      version: session.version,
+    });
+    const result = (await api(
+      `/api/sessions/${encodeURIComponent(session.id)}/messages?${params}`,
+    )) as ConversationPage;
+    if (conversation !== current) return;
+    current.page = result;
+    cacheConversation(key, result);
+  } catch {
+    current.failed = true;
+  } finally {
+    if (conversation === current) {
+      current.loading = false;
+      render();
+      scrollToMessage();
+    }
+  }
+}
+function showError(failure: unknown): void {
+  error = failure instanceof Error ? failure.message : t("requestFailed");
+  render();
+}
+async function fetchSessions({ reset = false } = {}): Promise<void> {
+  if (!catalog.paged || view !== "sessions") return;
+  const request = ++listRequest;
+  listPending = true;
+  if (reset) {
+    pageOffset = 0;
+    selected.clear();
+  }
+  const query = filters.query.trim();
+  const params = new URLSearchParams({
+    q: query,
+    provider: filters.provider,
+    project: filters.project,
+    review: filters.review,
+    sort: filters.sort,
+    ascending: filters.ascending ? "1" : "0",
+    offset: String(pageOffset),
+  });
+  render();
+  try {
+    const data = (await api(
+      `/api/${query ? "search" : "sessions"}?${params}`,
+    )) as SessionPage;
+    if (request !== listRequest || view !== "sessions") return;
+    if (pageOffset > 0 && data.sessions.length === 0) {
+      pageOffset = Math.max(0, Math.floor((data.total - 1) / 50) * 50);
+      await fetchSessions();
+      return;
+    }
+    sessionPage = data;
+    catalog.sessions = data.sessions;
+    for (const session of data.sessions)
+      reviews[session.id] = session.review ?? "pending";
+  } catch (failure) {
+    if (request === listRequest) showError(failure);
+  } finally {
+    if (request === listRequest) {
+      listPending = false;
+      render();
+    }
+  }
+}
+function scheduleSearch(): void {
+  window.clearTimeout(searchTimer);
+  if (!catalog.paged || view !== "sessions") return;
+  listRequest++;
+  listPending = true;
+  closeDetail();
+  selected.clear();
+  searchTimer = window.setTimeout(
+    () => void fetchSessions({ reset: true }),
+    160,
+  );
+}
+function updateSessionFilters(): void {
+  if (!catalog.paged || view !== "sessions") return;
+  window.clearTimeout(searchTimer);
+  closeDetail();
+  void fetchSessions({ reset: true });
+}
+async function refreshActivity(): Promise<void> {
+  const request = ++activityRequest;
+  try {
+    const params = new URLSearchParams({
+      days: String(activityDays),
+      provider: filters.provider,
+    });
+    const result = catalog.paged
+      ? ((await api(`/api/activity?${params}`)) as ActivityGroup[])
+      : localActivity(
+          catalog.sessions,
+          referenceTime(),
+          activityDays,
+          filters.provider,
+        );
+    if (request === activityRequest && view === "activity") {
+      activity = result;
+      render();
+    }
+  } catch (failure) {
+    if (request === activityRequest) showError(failure);
+  }
+}
+function showNote(draft: NoteDraft): void {
+  noteDraft = draft;
+  render();
+  root.querySelector<HTMLDialogElement>("#note-dialog")?.showModal();
+}
+function copyText(value: string): Promise<void> {
+  return navigator.clipboard.writeText(value);
+}
+function exportNote(note: Note): void {
+  const url = URL.createObjectURL(
+    new Blob([noteMarkdown(note)], { type: "text/markdown;charset=UTF-8" }),
+  );
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `session-desk-note-${note.id}.md`;
+  link.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+async function saveNote(event: SubmitEvent): Promise<void> {
+  const form = event.target;
+  if (
+    !(form instanceof HTMLFormElement) ||
+    form.id !== "note-form" ||
+    !noteDraft
+  )
+    return;
+  event.preventDefault();
+  const fields = new FormData(form);
+  const draft = {
+    ...noteDraft,
+    title: String(fields.get("title")).trim(),
+    body: String(fields.get("body")).trim(),
+  };
+  if (!draft.title || !draft.body) return;
+  const submit = form.querySelector<HTMLButtonElement>('[type="submit"]');
+  if (submit) submit.disabled = true;
+  try {
+    const saved =
+      catalog.mode === "demo"
+        ? {
+            ...draft,
+            id: draft.id ?? String(Date.now()),
+            updated_at: Date.now() / 1000,
+            source_available: true,
+          }
+        : ((await api("/api/notes", draft)) as Note);
+    catalog.notes = [
+      saved,
+      ...(catalog.notes ?? []).filter((note) => note.id !== saved.id),
+    ];
+    noteDraft = undefined;
+    notice = t("noteSaved");
+    render();
+  } catch {
+    const message = form.querySelector<HTMLElement>("[role=alert]");
+    if (message) message.textContent = t("requestFailed");
+    if (submit) submit.disabled = false;
+  }
 }
 async function api(path: string, body?: unknown): Promise<unknown> {
   if (catalog.mode !== "local") throw new Error(t("readOnly"));
@@ -224,8 +522,11 @@ async function api(path: string, body?: unknown): Promise<unknown> {
     );
   return result;
 }
-async function refresh(): Promise<void> {
-  const value = (await api("/api/catalog")) as Bootstrap;
+async function refresh(cached = false): Promise<void> {
+  const previous = activeSession?.id;
+  const value = (await api(
+    cached ? "/api/catalog?cached=1" : "/api/catalog",
+  )) as Bootstrap;
   if (
     !Array.isArray(value.sessions) ||
     !Array.isArray(value.memories) ||
@@ -233,9 +534,24 @@ async function refresh(): Promise<void> {
   )
     throw new Error(t("requestFailed"));
   catalog = value;
+  conversationCache.clear();
+  closeDetail();
+  if (view === "sessions") {
+    await fetchSessions();
+    const session = sessionPage?.sessions.find((row) => row.id === previous);
+    if (session) openItem(session.id);
+  } else if (view === "activity") {
+    await refreshActivity();
+  }
 }
 async function mutate(kind: "trash" | "restore", ids: string[]): Promise<void> {
-  if (busy || catalog.mode === "static" || !ids.length) return;
+  if (
+    busy ||
+    catalog.mode === "static" ||
+    !ids.length ||
+    (kind === "trash" && view === "sessions" && listPending)
+  )
+    return;
   busy = true;
   error = "";
   notice = "";
@@ -288,7 +604,7 @@ async function mutate(kind: "trash" | "restore", ids: string[]): Promise<void> {
           ? { ids, versions, kind: view === "sessions" ? "session" : "memory" }
           : { ids },
       )) as { done: string[]; errors: { message: string }[] };
-      await refresh();
+      await refresh(true);
       if (result.errors?.length)
         error = result.errors.map((item) => item.message).join(" ");
     }
@@ -305,18 +621,21 @@ root.addEventListener("input", (event) => {
   const input = event.target as HTMLInputElement;
   if (input.id === "search") {
     filters.query = input.value;
+    scheduleSearch();
     render();
   }
 });
 root.addEventListener("change", (event) => {
   const control = event.target as HTMLInputElement | HTMLSelectElement;
+  if (control.closest("#note-form")) return;
   if (control.dataset.select) {
+    if (listPending && view === "sessions") return;
     if ((control as HTMLInputElement).checked)
       selected.add(control.dataset.select);
     else selected.delete(control.dataset.select);
   } else if (control.id === "select-all")
     selected = (control as HTMLInputElement).checked
-      ? new Set(visibleItems().map((item) => item.id))
+      ? new Set(selectableItems().map((item) => item.id))
       : new Set();
   else if (control.id === "language") {
     language = control.value as Language;
@@ -325,6 +644,11 @@ root.addEventListener("change", (event) => {
   else if (control.id === "project") filters.project = control.value;
   else if (control.id === "review") filters.review = control.value;
   else if (control.id === "age") age = control.value;
+  else if (control.id === "activity-days") activityDays = Number(control.value);
+  if (["provider", "project", "review"].includes(control.id))
+    updateSessionFilters();
+  if (view === "activity" && ["provider", "activity-days"].includes(control.id))
+    void refreshActivity();
   render();
 });
 root.addEventListener("click", async (event) => {
@@ -348,8 +672,11 @@ root.addEventListener("click", async (event) => {
     event.preventDefault();
     view = action === "home" ? "sessions" : (action.slice(5) as View);
     clearFilters();
-    detailId = "";
-    mobileDetail = false;
+    closeDetail();
+    listRequest++;
+    window.clearTimeout(searchTimer);
+    if (view === "sessions") void fetchSessions({ reset: true });
+    if (view === "activity") void refreshActivity();
     notice = "";
     error = "";
     render();
@@ -363,49 +690,118 @@ root.addEventListener("click", async (event) => {
     demoRemoved.clear();
     reviews = {};
     clearFilters();
+    closeDetail();
     detailId = catalog.sessions[0]?.id ?? "";
     view = "sessions";
     mobileDetail = false;
     notice = t("resetDone");
     error = "";
-  } else if (action === "clear-filters") clearFilters();
-  else if (action === "clear-selection") selected.clear();
+  } else if (action === "clear-filters") {
+    clearFilters();
+    updateSessionFilters();
+  } else if (action === "clear-selection") selected.clear();
   else if (action === "dismiss-error") error = "";
   else if (action === "dismiss-notice") notice = "";
   else if (action === "close-detail") {
-    detailId = "";
-    mobileDetail = false;
+    closeDetail();
   } else if (action.startsWith("sort-")) {
     const next = action.slice(5) as Filters["sort"];
     filters.ascending =
       filters.sort === next ? !filters.ascending : next === "title";
     filters.sort = next;
+    updateSessionFilters();
   } else if (action.startsWith("tab-")) detailTab = action.slice(4);
   else if (action.startsWith("review-") && catalog.mode !== "static") {
     reviews[detailId] = action.slice(7) as Review;
-    if (catalog.mode === "local") persist("review", reviews);
+    if (catalog.paged) {
+      try {
+        await api("/api/reviews", {
+          reviews: { [detailId]: reviews[detailId] },
+        });
+        if (filters.review !== "all") await fetchSessions();
+      } catch (failure) {
+        showError(failure);
+        await fetchSessions();
+      }
+    }
   } else if (action === "trash") {
     (document.getElementById("trash-dialog") as HTMLDialogElement).showModal();
     return;
   } else if (action === "confirm-trash") {
     (document.getElementById("trash-dialog") as HTMLDialogElement).close();
-    await mutate("trash", [...visibleSelection(selected, visibleItems())]);
+    await mutate("trash", [...visibleSelection(selected, selectableItems())]);
     root.querySelector<HTMLElement>("#search")?.focus();
     return;
   } else if (action === "restore") {
     await mutate("restore", [target.dataset.id ?? ""]);
     return;
-  } else if (action === "origin") {
+  } else if (action === "origin" || action === "activity-session") {
     view = "sessions";
     clearFilters();
-    openItem(target.dataset.id ?? "");
+    void fetchSessions({ reset: true });
+    openItem(
+      target.dataset.id ?? "",
+      target.dataset.position === undefined
+        ? undefined
+        : Number(target.dataset.position),
+    );
     return;
-  } else if (action === "copy") {
-    const session = catalog.sessions.find((item) => item.id === detailId);
+  } else if (action === "page-next" || action === "page-previous") {
+    closeDetail();
+    selected.clear();
+    pageOffset = Math.max(0, pageOffset + (action === "page-next" ? 50 : -50));
+    await fetchSessions();
+  } else if (action === "conversation-retry") {
+    await loadConversation(conversation?.offset ?? 0);
+  } else if (action === "conversation-page" || action === "context-message") {
+    targetMessage =
+      action === "context-message"
+        ? Number(target.dataset.position)
+        : undefined;
+    detailTab = "conversation";
+    await loadConversation(Number(target.dataset.offset));
+  } else if (action === "note-add") {
+    const session =
+      activeSession ?? catalog.sessions.find((item) => item.id === detailId);
+    if (session) {
+      const position = Number(target.dataset.position);
+      const page = conversation?.page ?? embeddedConversation(session);
+      showNote({
+        session_id: session.id,
+        version: session.version,
+        position,
+        title: "",
+        body: page.messages[position - page.offset]?.text.slice(0, 50000) ?? "",
+      });
+    }
+    return;
+  } else if (action === "note-edit" || action === "note-export") {
+    const note = catalog.notes?.find((item) => item.id === target.dataset.id);
+    if (note) {
+      if (action === "note-edit") showNote(note);
+      else exportNote(note);
+    }
+    return;
+  } else if (action === "cancel-note") {
+    noteDraft = undefined;
+    root.querySelector<HTMLDialogElement>("#note-dialog")?.close();
+    render();
+    return;
+  } else if (action === "copy" || action === "copy-context") {
+    const session =
+      activeSession ?? catalog.sessions.find((item) => item.id === detailId);
     if (session) {
       try {
-        await navigator.clipboard.writeText(commandFor(session));
-        copied = true;
+        if (action === "copy-context") {
+          const page = conversation?.page ?? embeddedConversation(session);
+          await copyText(contextMarkdown(session, page.context, language));
+          notice = t("copied");
+        } else {
+          await copyText(
+            commandFor(session) || session.title || session.session_id,
+          );
+          copied = true;
+        }
       } catch {
         error = t("copyFailed");
       }
@@ -456,10 +852,12 @@ document.addEventListener("keydown", (event) => {
     event.preventDefault();
     document.getElementById("search")?.focus();
   } else if (event.key === "Escape" && detailId) {
-    detailId = "";
-    mobileDetail = false;
+    closeDetail();
     render();
-  } else if (["j", "k"].includes(event.key) && view !== "trash") {
+  } else if (
+    ["j", "k"].includes(event.key) &&
+    ["sessions", "memories"].includes(view)
+  ) {
     const items = visibleItems();
     if (!items.length) return;
     const index = items.findIndex((item) => item.id === detailId);
@@ -474,4 +872,51 @@ document.addEventListener("keydown", (event) => {
       ?.scrollIntoView({ block: "nearest" });
   }
 });
-render();
+root.addEventListener("submit", (event) => void saveNote(event));
+root.addEventListener(
+  "cancel",
+  (event) => {
+    if (
+      event.target instanceof HTMLDialogElement &&
+      event.target.id === "note-dialog"
+    )
+      noteDraft = undefined;
+  },
+  true,
+);
+async function initialize(): Promise<void> {
+  render();
+  if (!catalog.paged) {
+    if (detailId) {
+      activeSession = catalog.sessions[0];
+      void loadConversation();
+    }
+    return;
+  }
+  try {
+    const legacy = Object.entries(reviews).filter(([id]) =>
+      /^[a-z]+:[0-9a-f]{64}$/.test(id),
+    );
+    const migrationKey = `session-desk:review-migrated:v1:${catalog.workspace_id}`;
+    if (legacy.length && !safeStorage.getItem(migrationKey)) {
+      for (let offset = 0; offset < legacy.length; offset += 1000) {
+        const batch = Object.fromEntries(legacy.slice(offset, offset + 1000));
+        await api("/api/reviews", { reviews: batch, migrate: true });
+      }
+      try {
+        localStorage.setItem(migrationKey, "true");
+      } catch {}
+    }
+    await refresh();
+    const first = catalog.sessions[0];
+    if (first && !detailId && view === "sessions" && !filters.query) {
+      openItem(first.id);
+      mobileDetail = false;
+      render();
+    }
+  } catch (failure) {
+    listPending = false;
+    showError(failure);
+  }
+}
+void initialize();

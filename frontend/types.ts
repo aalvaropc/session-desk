@@ -1,7 +1,11 @@
-export type Provider = "claude" | "codex";
+export type Provider = "claude" | "codex" | "antigravity";
 export type Review = "keep" | "pending";
-export type View = "sessions" | "memories" | "trash";
+export type View = "sessions" | "memories" | "trash" | "activity";
 export type Language = "en" | "es";
+export interface ChatMessage {
+  role: "user" | "assistant";
+  text: string;
+}
 export interface Session {
   id: string;
   session_id: string;
@@ -14,11 +18,16 @@ export interface Session {
   updated_at: string;
   timestamp: number;
   size_bytes: number;
-  message_count: number;
-  prompt_count: number;
-  messages: { role: "user" | "assistant"; text: string }[];
+  message_count: number | null;
+  prompt_count: number | null;
+  messages: ChatMessage[];
   match: string;
   version: string;
+  variant?: "cli" | "app" | "ide";
+  has_transcript?: boolean;
+  activity_source?: "recorded" | "file";
+  hit?: { position: number; snippet: string } | null;
+  review?: Review;
 }
 export interface Memory {
   id: string;
@@ -27,6 +36,7 @@ export interface Memory {
   description: string;
   memory_type: string;
   origin_session_id: string;
+  origin_row_id?: string | null;
   body: string;
   project_path: string;
   file_path: string;
@@ -46,6 +56,9 @@ export interface TrashEntry {
 }
 export interface Bootstrap {
   sessions: Session[];
+  paged?: boolean;
+  workspace_id?: string;
+  notes?: Note[];
   memories: Memory[];
   trash: TrashEntry[];
   generated_at: string;
@@ -60,4 +73,53 @@ export interface Filters {
   review: string;
   sort: "updated" | "title";
   ascending: boolean;
+}
+
+export interface SessionPage {
+  sessions: Session[];
+  total: number;
+  catalog_total: number;
+  projects: string[];
+}
+export interface ContextMessage {
+  position: number;
+  text: string;
+}
+export interface ConversationPage {
+  messages: ChatMessage[];
+  total: number;
+  offset: number;
+  context: Partial<Record<ChatMessage["role"], ContextMessage>>;
+}
+export interface ConversationState {
+  id: string;
+  version: string;
+  page?: ConversationPage;
+  loading: boolean;
+  failed: boolean;
+  offset: number;
+}
+export interface Note {
+  id: string;
+  session_id: string;
+  position: number;
+  title: string;
+  body: string;
+  updated_at: number;
+  source_available: boolean;
+}
+export interface NoteDraft {
+  id?: string;
+  version?: string;
+  session_id: string;
+  position: number;
+  title: string;
+  body: string;
+}
+export interface ActivityGroup {
+  project: string;
+  sessions: Pick<
+    Session,
+    "id" | "title" | "provider" | "updated_at" | "activity_source"
+  >[];
 }

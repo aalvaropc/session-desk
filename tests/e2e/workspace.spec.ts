@@ -8,7 +8,7 @@ test.beforeEach(async ({ page }) => {
 test("demo supports search, provider filters and a visible conversation", async ({
   page,
 }) => {
-  await expect(page.getByTestId("session-row")).toHaveCount(12);
+  await expect(page.getByTestId("session-row")).toHaveCount(15);
   await page.getByTestId("provider-filter").selectOption("codex");
   await expect(page.getByTestId("session-row")).toHaveCount(6);
   await page.getByTestId("search").fill("onboarding");
@@ -47,7 +47,7 @@ test("corrupt browser state recovers and review controls retain focus", async ({
     localStorage.setItem("cc-sessions-state", "{invalid JSON");
   });
   await page.reload();
-  await expect(page.getByTestId("session-row")).toHaveCount(12);
+  await expect(page.getByTestId("session-row")).toHaveCount(15);
   await page.getByTestId("row-open").first().click();
   const keep = page.getByTestId("review-keep");
   await keep.focus();
@@ -65,11 +65,11 @@ test("demo trash and restore never require a filesystem mutation", async ({
   await page.getByTestId("row-select").first().check();
   await page.getByTestId("trash-selected").click();
   await page.getByTestId("confirm-trash").click();
-  await expect(page.getByTestId("session-row")).toHaveCount(11);
+  await expect(page.getByTestId("session-row")).toHaveCount(14);
   await page.getByTestId("nav-trash").click();
   await page.getByTestId("restore-item").first().click();
   await page.getByTestId("nav-sessions").click();
-  await expect(page.getByTestId("session-row")).toHaveCount(12);
+  await expect(page.getByTestId("session-row")).toHaveCount(15);
   expect(requests).toEqual([]);
 });
 

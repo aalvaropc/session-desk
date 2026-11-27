@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Mapping, Optional, Sequence, Union
 
-from .models import BatchResult, Memory, ScanWarning, Session, TrashEntry
+from .models import BatchResult, Memory, Message, ScanWarning, Session, TrashEntry
 from .providers.codex import extract_codex
 from .providers.codex_index import CodexIndex
 from .providers.common import readable, records, snippet, text_content
@@ -19,8 +19,9 @@ class SessionStore:
         self,
         claude_home: Optional[Union[str, Path]] = None,
         codex_home: Optional[Union[str, Path]] = None,
+        antigravity_home: Optional[Union[str, Path]] = None,
     ) -> None:
-        self._state = StoreState(claude_home, codex_home)
+        self._state = StoreState(claude_home, codex_home, antigravity_home)
         self.index = CodexIndex(self._state)
         self._catalog = Catalog(self._state, self.index)
         self._trash = TrashService(self._state, self.index)
@@ -37,11 +38,17 @@ class SessionStore:
     def warnings(self) -> list[ScanWarning]:
         return self._state.warnings
 
-    def scan(self, grep: Optional[str] = None) -> list[Session]:
-        return self._catalog.scan(grep)
+    def scan(self, grep: Optional[str] = None, *, previews: bool = True) -> list[Session]:
+        return self._catalog.scan(grep, previews=previews)
 
     def memories(self) -> list[Memory]:
         return self._catalog.memories()
+
+    def messages(self, identifier: str) -> list[Message]:
+        return self.conversation(identifier)[0]
+
+    def conversation(self, identifier: str) -> tuple[list[Message], float]:
+        return self._catalog.conversation(identifier)
 
     def trash(
         self,

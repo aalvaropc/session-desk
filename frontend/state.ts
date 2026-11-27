@@ -153,6 +153,8 @@ export function resolveOriginSession(
 
 export function commandFor(session: Session): string {
   const id = `'${session.session_id.replace(/'/g, "'\\''")}'`;
+  if (session.provider === "antigravity")
+    return session.variant === "cli" ? `agy --conversation ${id}` : "";
   return session.provider === "claude"
     ? `claude --resume ${id}`
     : `codex resume ${id}`;
