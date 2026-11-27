@@ -11,18 +11,19 @@ from .config import Settings
 from .demo import demo_store
 from .rendering import build_catalog, render_page
 from .server import make_server
+from .services.workspace import Workspace, workspace_path
 from .sessions import SessionStore
 
 
 def parse_settings(arguments: Optional[Sequence[str]] = None) -> Settings:
     parser = argparse.ArgumentParser(
         prog="session-desk",
-        description="A private workspace for your Claude Code and Codex conversations.",
+        description="A private workspace for your Claude Code, Codex and Antigravity conversations.",
     )
     parser.add_argument(
         "action",
         nargs="?",
-        choices=("start", "status", "stop"),
+        choices=("start", "status", "stop", "reindex"),
         help="manage a local background workspace",
     )
     parser.add_argument("--managed-instance", help=argparse.SUPPRESS)
@@ -51,6 +52,7 @@ def parse_settings(arguments: Optional[Sequence[str]] = None) -> Settings:
     )
     parser.add_argument("--claude-home", help="Claude directory; defaults to ~/.claude")
     parser.add_argument("--codex-home", help="Codex directory; defaults to CODEX_HOME or ~/.codex")
+    parser.add_argument("--antigravity-home", help="Antigravity data parent; defaults to ~/.gemini")
     parser.add_argument("-p", "--project", help="filter by a substring of the project path")
     parser.add_argument(
         "-g",
@@ -70,14 +72,30 @@ def parse_settings(arguments: Optional[Sequence[str]] = None) -> Settings:
         or arguments_parsed.search
         or arguments_parsed.claude_home
         or arguments_parsed.codex_home
+        or arguments_parsed.antigravity_home
     ):
         parser.error("status and stop operate on the managed workspace and take no launch options")
     if arguments_parsed.serve and arguments_parsed.static:
         parser.error("--serve and --static cannot be used together")
     if not 0 <= arguments_parsed.port <= 65535:
         parser.error("--port must be between 0 and 65535")
-    if arguments_parsed.demo and (arguments_parsed.claude_home or arguments_parsed.codex_home):
+    if arguments_parsed.demo and any(
+        (
+            arguments_parsed.claude_home,
+            arguments_parsed.codex_home,
+            arguments_parsed.antigravity_home,
+        )
+    ):
         parser.error("--demo uses isolated sample data and cannot be combined with provider roots")
+    if arguments_parsed.action == "reindex" and any(
+        (
+            arguments_parsed.demo,
+            arguments_parsed.open_browser,
+            arguments_parsed.project,
+            arguments_parsed.search,
+        )
+    ):
+        parser.error("reindex accepts provider roots and requires a stopped workspace")
     values = vars(arguments_parsed)
     values["output"] = Path(values["output"]).expanduser()
     return Settings(**values)
@@ -85,6 +103,17 @@ def parse_settings(arguments: Optional[Sequence[str]] = None) -> Settings:
 
 def main(arguments: Optional[Sequence[str]] = None) -> None:
     settings = parse_settings(arguments)
+    if settings.action == "reindex":
+        store = SessionStore(settings.claude_home, settings.codex_home, settings.antigravity_home)
+        rebuild_path = workspace_path(background.state_directory(), store)
+        try:
+            with background.launch_lock(rebuild_path.with_suffix(".lock"), timeout=0):
+                with Workspace(store, rebuild_path) as workspace:
+                    workspace.refresh(rebuild=True)
+                    print(f"Indexed {len(workspace.rows)} sessions.")
+        except (OSError, RuntimeError, ValueError) as error:
+            raise SystemExit(str(error)) from error
+        return
     if settings.action:
         try:
             if settings.action == "start":
@@ -110,10 +139,17 @@ def main(arguments: Optional[Sequence[str]] = None) -> None:
         store = (
             context.enter_context(demo_store())
             if settings.demo
-            else SessionStore(settings.claude_home, settings.codex_home)
+            else SessionStore(settings.claude_home, settings.codex_home, settings.antigravity_home)
         )
         if (settings.serve or settings.open_browser or settings.demo) and not settings.static:
             try:
+                index_path = (
+                    None if settings.demo else workspace_path(background.state_directory(), store)
+                )
+                if index_path is not None:
+                    context.enter_context(
+                        background.launch_lock(index_path.with_suffix(".lock"), timeout=0)
+                    )
                 server = make_server(
                     store,
                     settings.port,
@@ -121,8 +157,9 @@ def main(arguments: Optional[Sequence[str]] = None) -> None:
                     settings.search,
                     settings.demo,
                     settings.managed_instance,
+                    index_path=index_path,
                 )
-            except OSError as error:
+            except (OSError, RuntimeError, ValueError) as error:
                 raise SystemExit(
                     f"Could not start Session Desk: {error}. Try another --port."
                 ) from error

@@ -118,7 +118,9 @@ class BackgroundTests(unittest.TestCase):
         (self.root / "server.json").write_text("{invalid", encoding="utf-8")
         self.assertIn("not running", self.run_cli("status").stdout.lower())
         server = make_server(
-            SessionStore(self.root / "claude", self.root / "codex"), port=0, instance_id="b" * 32
+            SessionStore(self.root / "claude", self.root / "codex", self.root / "gemini"),
+            port=0,
+            instance_id="b" * 32,
         )
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()

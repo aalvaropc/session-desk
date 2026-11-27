@@ -1515,17 +1515,18 @@ dialog p {
   .sidebar nav {
     grid-column: 1/-1;
     grid-row: 2;
-    display: flex;
-    gap: 9px;
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 3px;
     margin-bottom: -1px;
   }
   .nav-item {
-    padding: 9px 10px;
+    padding: 9px 2px;
     min-height: 43px;
     font-size: 12px;
     border-radius: 4px 4px 0 0;
-    width: auto;
-    gap: 7px;
+    width: 100%;
+    gap: 4px;
   }
   .nav-item svg {
     width: 16px;
@@ -1908,4 +1909,141 @@ dialog p {
   .resume-command {
     grid-row: 2;
   }
+}
+
+.page-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.session-context {
+  margin: 0 16px 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--subtle);
+}
+
+.session-context summary,
+.analysis-group summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.session-context section {
+  margin: 12px 0;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.session-context h3,
+.analysis-groups h2,
+.analysis-group h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.session-context p,
+.note p {
+  margin: 6px 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.message-hit {
+  background: var(--selected);
+  border-radius: 5px;
+}
+
+.message-hit mark {
+  color: var(--ink);
+  background: color-mix(in srgb, var(--accent) 23%, var(--surface));
+}
+
+.analysis-groups {
+  min-height: 0;
+  overflow: auto;
+  display: grid;
+  align-content: start;
+  gap: 8px;
+}
+
+.analysis-group {
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--surface);
+  overflow-wrap: anywhere;
+}
+
+.analysis-group summary > span {
+  margin-inline-start: 10px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.analysis-group ul {
+  list-style: none;
+  padding: 0;
+  margin: 8px 0 0;
+}
+
+.analysis-group li,
+.note > div {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+}
+
+.analysis-group li {
+  justify-content: space-between;
+  border-top: 1px solid var(--line);
+}
+
+.analysis-group li > span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.note-dialog form,
+.note-dialog label {
+  display: grid;
+  gap: 8px;
+}
+
+.note-dialog input,
+.note-dialog textarea {
+  width: 100%;
+  padding: 9px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  color: var(--ink);
+  background: var(--surface);
+  font: inherit;
+}
+
+.note-dialog textarea {
+  resize: vertical;
+}
+
+@media (max-width: 420px) {
+  .sidebar nav .nav-item svg {
+    display: none;
+  }
+}
+
+.workspace.has-notes .work-area {
+  min-height: 220px;
+}
+
+.workspace.has-notes .analysis-groups {
+  margin-top: 12px;
+  max-height: 36vh;
 }

@@ -1,6 +1,10 @@
 # Session Desk
 
-A local workspace for Claude Code and Codex conversations. Search sessions, inspect context, copy a resume command, and move sessions or project memories to a recoverable trash. Your data stays on your computer.
+A local workspace for Claude Code, Codex, and Antigravity conversations. Find a message,
+recover context for your next session, and keep useful decisions as linked notes.
+Your data stays on your computer.
+
+[Open the synthetic demo](https://aalvaropc.github.io/session-desk/)
 
 ![Session Desk workspace](docs/screenshots/workspace.png)
 
@@ -19,13 +23,33 @@ From a source checkout, use `uv run session-desk start --open`. To explore witho
 
 ## What it does
 
-- Finds Claude Code and Codex sessions in their default directories or custom roots.
-- Searches, filters, and reviews conversations and Claude project memories.
-- Copies the provider's resume command for a selected session.
-- Moves sessions and memories to recoverable trash and restores them from the panel.
-- Exports an offline HTML snapshot with `session-desk --static -o sessions.html`.
+- Searches complete readable conversations, shows a match preview, and jumps to the message.
+- Copies a resume command or a Markdown brief with the last request, last reply, project, and branch where available.
+- Groups recent sessions by project and provider and opens the conversations behind each count.
+- Saves editable notes linked to a message and exports them to Markdown.
+- Moves Claude Code and Codex sessions and Claude project memories to recoverable trash.
+- Exports a read-only HTML snapshot with `session-desk --static -o sessions.html`.
 
-Use `session-desk --help` for options such as `--claude-home`, `--codex-home`, `--port`, and scan filters. The demo contains only synthetic data. Exports of your own sessions contain private text; keep them private.
+| Source | Default discovery | Continue | Recoverable trash |
+| --- | --- | --- | --- |
+| Claude Code | `~/.claude` | `claude --resume` | Sessions and project memories |
+| Codex | `$CODEX_HOME` or `~/.codex` | `codex resume` | Sessions |
+| Antigravity CLI | `~/.gemini/antigravity-cli` | `agy --conversation` | — |
+| Antigravity App | `~/.gemini/antigravity` | Conversation search in the App | — |
+| Antigravity IDE | `~/.gemini/antigravity-ide` | History in the agent side panel | — |
+
+Antigravity reads the available JSONL and the summary database. Conversations whose text
+is stored only in an opaque native file appear as metadata. Session Desk opens
+Antigravity source files for reading. Use `--antigravity-home` to replace the shared
+parent directory.
+
+## Local storage
+
+The live workspace keeps a searchable copy of readable messages under Session Desk's
+private local state directory. Refresh incorporates changes from the providers.
+Run `session-desk stop` and then `session-desk reindex` to rebuild the searchable copy.
+Pass the same custom provider roots when applicable. Reindex retains saved reviews and
+notes. HTML exports can contain private text and include conversation previews.
 
 ## Development
 
@@ -37,5 +61,10 @@ uv run python -m unittest discover -s tests
 npm run test:unit
 npm run test:e2e
 ```
+
+To build a standalone synthetic demo locally, run
+`uv run session-desk --demo --static -o demo.html` and open the resulting file. The
+**Publish synthetic demo** workflow deploys that same export. It runs on demand once
+GitHub Pages is configured to use GitHub Actions.
 
 The TypeScript interface is bundled into the Python package. See [architecture](docs/architecture.md), [contributing](CONTRIBUTING.md), and the [MIT license](LICENSE).

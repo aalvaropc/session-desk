@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Fixed loading of complete Claude Code and Codex conversations in the browser.
+- Added paginated full-text search with snippets and links to matching messages.
+- Added read-only Antigravity CLI, App, and IDE discovery and conversation reading.
+- Added Markdown resume context, project activity, and editable message-linked notes.
+
 ## 0.3.0 — Session Desk
 
 - Background `start`, `status` and `stop` commands with detached startup, authenticated

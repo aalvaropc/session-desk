@@ -5,7 +5,8 @@ import sqlite3
 from pathlib import Path
 from typing import Optional
 
-from ..models import Memory, Session
+from ..models import Memory, Message, Session
+from ..providers.antigravity import discover, read_steps
 from ..providers.codex import extract_codex
 
 
@@ -14,7 +15,7 @@ class Catalog:
         self.state = state
         self.index = index
 
-    def scan(self, grep: Optional[str] = None) -> list[Session]:
+    def scan(self, grep: Optional[str] = None, *, previews: bool = True) -> list[Session]:
         from ..providers.claude import extract, load_history
 
         self.state.warnings = []
@@ -72,19 +73,22 @@ class Catalog:
                     raw["proj"],
                     str(path),
                     raw["branch"],
-                    datetime.datetime.fromtimestamp(path.stat().st_mtime).isoformat(
-                        timespec="seconds"
-                    ),
-                    raw["ts"],
+                    datetime.datetime.fromtimestamp(
+                        raw.get("activity") or before[2] / 1_000_000_000
+                    )
+                    .astimezone()
+                    .isoformat(timespec="seconds"),
+                    int(raw.get("activity") or raw["ts"]),
                     before[1],
                     raw["msgs"],
                     raw["prompts"],
                     [
                         {"role": "user" if m["r"] == "u" else "assistant", "text": m["t"]}
-                        for m in raw["last"]
+                        for m in (raw["last"] if previews else [])
                     ],
                     raw["match"],
                     version,
+                    activity_source="recorded" if raw.get("activity") else "file",
                 )
                 if provider == "codex":
                     indexed_path = metadata.get(sid, {}).get("rollout_path")
@@ -97,24 +101,42 @@ class Catalog:
         self.state.registry = {
             key: value for key, value in self.state.registry.items() if isinstance(value, Memory)
         }
+        antigravity = discover(self.state, grep, previews=previews)
+        for row in antigravity:
+            registry[row.id] = row
+            if row.file_path in self.state.cache:
+                cache[row.file_path] = self.state.cache[row.file_path]
+        rows.extend(antigravity)
         self.state.registry.update(registry)
         self.state.fingerprints.update(fingerprints)
         self.state.cache = cache
         self.state.index_paths = index_paths
         return sorted(rows, key=lambda row: row.timestamp, reverse=True)
 
-    def messages(self, identifier: str) -> list[dict]:
+    def conversation(self, identifier: str) -> tuple[list[Message], float]:
         from ..providers.claude import load_messages
         from ..providers.codex import load_codex_messages
 
         row = self.state.registry.get(identifier)
         if not isinstance(row, Session):
             raise KeyError(identifier)
-        path = Path(row.file_path)
-        self.state.safe(path, self.state.roots[row.provider])
-        if row.provider == "claude":
-            return load_messages(str(path))
-        return load_codex_messages(path)
+        if not row.has_transcript:
+            return [], 0.0
+        path = self.state.safe(Path(row.file_path), self.state.roots[row.provider])
+        before = self.state.fingerprint(path)
+        version = ":".join(map(str, before))
+        if row.version not in (version, version + ":" + path.name):
+            raise ValueError("Conversation changed; refresh the workspace")
+        latest = 0.0
+        if row.provider == "antigravity":
+            messages, latest = read_steps(path)
+        elif row.provider == "claude":
+            messages = load_messages(str(path))
+        else:
+            messages = load_codex_messages(path)
+        if self.state.fingerprint(path) != before:
+            raise ValueError("Conversation changed; refresh the workspace")
+        return messages, latest
 
     def memories(self) -> list[Memory]:
         from ..providers.claude import extract_memory

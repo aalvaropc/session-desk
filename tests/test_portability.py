@@ -16,7 +16,7 @@ class PortabilityTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         self.claude = self.root / "claude"
-        self.store = SessionStore(self.claude, self.root / "codex")
+        self.store = SessionStore(self.claude, self.root / "codex", self.root / "gemini")
 
     def sidecar_session(self):
         transcript = claude_session(self.claude)

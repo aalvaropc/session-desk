@@ -51,6 +51,8 @@ class TrashService:
             or kind not in ("session", "memory")
         ):
             raise ValueError("Tipo de entrada incorrecto")
+        if row.provider == "antigravity":
+            raise ValueError("Antigravity sessions are read-only")
         if versions is not None and versions.get(sid) != row.version:
             raise ValueError("La versión cambió; actualiza el panel")
         root = self.state.roots[row.provider]
@@ -114,7 +116,8 @@ class TrashService:
 
     def _trash_entries(self):
         entries = {}
-        for provider, root in self.state.roots.items():
+        for provider in ("claude", "codex"):
+            root = self.state.roots[provider]
             for file in (root / "trash" / "sessions-panel").glob("*/manifest.json"):
                 try:
                     self.state.safe(file, root)

@@ -4,6 +4,7 @@ import socket
 import threading
 import unittest
 from unittest.mock import patch
+from urllib.parse import quote
 
 import test_sessions as fixtures
 from test_sessions import claude_session
@@ -67,7 +68,10 @@ class ServerTests(unittest.TestCase):
         records = [{"type": "user", "cwd": "/workspace", "message": {"content": long_text}}]
         for index in range(30):
             records.append(
-                {"type": "assistant", "message": {"content": [{"type": "text", "text": f"r{index}"}]}}
+                {
+                    "type": "assistant",
+                    "message": {"content": [{"type": "text", "text": f"r{index}"}]},
+                }
             )
         write_jsonl(self.claude / "projects" / "-workspace" / "long.jsonl", records)
         self.start_server()
@@ -81,7 +85,12 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(len(messages), 31)
         self.assertEqual(messages[0], {"role": "user", "text": long_text})
         self.assertEqual(messages[-1]["text"], "r29")
-        for bad in ("/api/sessions/claude:" + "0" * 64 + "/messages", "/api/sessions/../x/messages"):
+        encoded = f"/api/sessions/{quote(session.id, safe='')}/messages"
+        self.assertEqual(self.request("GET", encoded, headers=self.headers())[0], 200)
+        for bad in (
+            "/api/sessions/claude:" + "0" * 64 + "/messages",
+            "/api/sessions/../x/messages",
+        ):
             self.assertEqual(self.request("GET", bad, headers=self.headers())[0], 404)
 
     def test_full_codex_conversation_ignores_instructions_and_duplicate_events(self):
@@ -124,7 +133,8 @@ class ServerTests(unittest.TestCase):
         self.start_server()
         status, body = self.request("GET", "/")
         self.assertEqual(status, 200)
-        self.assertIn(b"Revisa el panel", body)
+        self.assertNotIn(b"Revisa el panel", body)
+        self.assertIn(b'"paged": true', body)
         session = self.server.store.scan()[0]
         stale = {"ids": [session.id], "versions": {session.id: "old"}}
         self.assertEqual(self.request("POST", "/api/trash", stale, self.headers())[0], 409)

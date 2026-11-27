@@ -1,7 +1,22 @@
 from __future__ import annotations
 
+import datetime
 import json
+import re
 from pathlib import Path
+from typing import Any
+
+SURROGATE = re.compile("[\ud800-\udfff]")
+
+
+def clean_json(value: Any) -> Any:
+    if isinstance(value, str):
+        return SURROGATE.sub("\ufffd", value)
+    if isinstance(value, dict):
+        return {clean_json(key): clean_json(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [clean_json(item) for item in value]
+    return value
 
 
 def records(path):
@@ -9,7 +24,9 @@ def records(path):
         for line in stream:
             try:
                 obj = json.loads(line)
-            except ValueError:
+                if r"\u" in line:
+                    obj = clean_json(obj)
+            except (ValueError, RecursionError):
                 continue
             if isinstance(obj, dict):
                 yield obj
@@ -42,3 +59,12 @@ def snippet(text, needle):
         return ""
     lo, hi = max(0, i - 60), min(len(flat), i + len(needle) + 60)
     return ("…" if lo else "") + flat[lo:hi] + ("…" if hi < len(flat) else "")
+
+
+def timestamp(value: object) -> float:
+    if not isinstance(value, str) or not value:
+        return 0.0
+    try:
+        return datetime.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except (ValueError, OSError, OverflowError):
+        return 0.0

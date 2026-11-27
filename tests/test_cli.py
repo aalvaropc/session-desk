@@ -19,7 +19,9 @@ class DistributionTests(unittest.TestCase):
             with demo_store() as store:
                 sessions = store.scan()
                 self.assertGreater(len(sessions), 10)
-                self.assertEqual({row.provider for row in sessions}, {"claude", "codex"})
+                self.assertEqual(
+                    {row.provider for row in sessions}, {"claude", "codex", "antigravity"}
+                )
                 self.assertNotIn(
                     "private content must not enter demo",
                     json.dumps([row.to_dict() for row in sessions]),
@@ -64,7 +66,7 @@ class DistributionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             claude_session(root / "claude", text="Keep this searchable request")
-            store = SessionStore(root / "claude", root / "codex")
+            store = SessionStore(root / "claude", root / "codex", root / "gemini")
             catalog = build_catalog(store, mode="static", search="searchable")
             self.assertEqual(len(catalog["sessions"]), 1)
             self.assertEqual(catalog["mode"], "static")

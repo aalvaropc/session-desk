@@ -85,7 +85,7 @@ class SessionTests(unittest.TestCase):
     def store(self):
         from session_desk.sessions import SessionStore
 
-        return SessionStore(self.claude, self.codex)
+        return SessionStore(self.claude, self.codex, self.claude.parent / "gemini")
 
     def test_spaced_claude_json_is_counted_and_searchable(self):
         path = claude_session(self.claude)
