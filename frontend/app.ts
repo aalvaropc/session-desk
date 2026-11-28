@@ -13,9 +13,11 @@ import type {
   Review,
   Session,
   SessionPage,
+  SessionTab,
   TrashEntry,
   View,
 } from "./types.js";
+import { sessionTabs } from "./types.js";
 import {
   filterSessions,
   isInteractive,
@@ -90,12 +92,15 @@ let filters: Filters = {
 let age = "all";
 let selected = new Set<string>();
 let detailId = catalog.sessions[0]?.id ?? "";
-let detailTab = "conversation";
+let detailTab: SessionTab = "conversation";
+let readingMode = false;
+let listScroll = 0;
 let mobileDetail = false;
 let busy = false;
 let notice = "";
 let error = "";
 let copied = false;
+let copiedMessage: number | undefined;
 let sessionPage: SessionPage | undefined;
 let pageOffset = 0;
 let listPending = !!catalog.paged;
@@ -157,21 +162,26 @@ function visibleItems(): (Session | Memory | TrashEntry)[] {
 function render(): void {
   if (noteDraft && root.querySelector<HTMLDialogElement>("#note-dialog")?.open)
     return;
-  const previousContext = root.querySelector<HTMLDetailsElement>(
-    ".session-context[open]",
-  )?.dataset.session;
   const active = document.activeElement as HTMLInputElement | null;
   const focusId = active?.id;
   const focusTest = active?.dataset.testid;
   const focusAction = active?.dataset.action;
+  const focusPosition = active?.dataset.position;
   const focusOpen = active?.dataset.open;
   const focusSelect = active?.dataset.select;
   const selectionStart =
     active?.tagName === "INPUT" && active.type === "search"
       ? active.selectionStart
       : null;
-  const listScroll = root.querySelector(".list-scroll")?.scrollTop ?? 0;
-  const detailScroll = root.querySelector(".detail-content")?.scrollTop ?? 0;
+  const previousList = root.querySelector(".list-scroll");
+  if (previousList?.getClientRects().length)
+    listScroll = previousList.scrollTop;
+  const previousDetail = root.querySelector(".detail-content");
+  const detailScroll =
+    previousDetail?.getAttribute("aria-labelledby") === `tab-${detailTab}` ||
+    view === "memories"
+      ? (previousDetail?.scrollTop ?? 0)
+      : 0;
   const items = visibleItems();
   selected = visibleSelection(selected, items);
   if (
@@ -180,6 +190,7 @@ function render(): void {
     !items.some((item) => item.id === detailId)
   ) {
     detailId = "";
+    readingMode = false;
     mobileDetail = false;
   }
   document.documentElement.lang = language;
@@ -195,11 +206,13 @@ function render(): void {
     selected,
     detailId,
     detailTab,
+    readingMode,
     mobileDetail,
     busy,
     notice,
     error,
     copied,
+    copiedMessage,
     activeSession,
     conversation,
     targetMessage,
@@ -212,10 +225,6 @@ function render(): void {
     noteDraft,
     items,
   });
-  if (previousContext && previousContext === detailId) {
-    const context = root.querySelector<HTMLDetailsElement>(".session-context");
-    if (context) context.open = true;
-  }
   const all = root.querySelector<HTMLInputElement>("#select-all");
   if (all)
     all.indeterminate =
@@ -232,7 +241,7 @@ function render(): void {
           )
         : focusAction
           ? root.querySelector<HTMLElement>(
-              `[data-action="${CSS.escape(focusAction)}"]`,
+              `[data-action="${CSS.escape(focusAction)}"]${focusPosition === undefined ? "" : `[data-position="${CSS.escape(focusPosition)}"]`}`,
             )
           : focusTest
             ? root.querySelector<HTMLElement>(
@@ -267,6 +276,7 @@ function closeDetail(): void {
   conversation = undefined;
   targetMessage = undefined;
   detailId = "";
+  readingMode = false;
   mobileDetail = false;
 }
 function openItem(id: string, position?: number): void {
@@ -274,6 +284,7 @@ function openItem(id: string, position?: number): void {
   detailId = id;
   mobileDetail = true;
   copied = false;
+  copiedMessage = undefined;
   detailTab = "conversation";
   activeSession =
     view === "sessions"
@@ -533,6 +544,7 @@ async function refresh(cached = false): Promise<void> {
   const previous = activeSession?.id;
   const wasMobileDetail = mobileDetail;
   const previousTab = detailTab;
+  const wasReading = readingMode;
   const previousMessage = targetMessage;
   const value = await refreshCatalog(cached);
   if (
@@ -551,6 +563,7 @@ async function refresh(cached = false): Promise<void> {
       openItem(session.id, previousMessage);
       mobileDetail = wasMobileDetail;
       detailTab = previousTab;
+      readingMode = wasReading;
       render();
     }
     openFirstSession();
@@ -787,14 +800,24 @@ root.addEventListener("click", async (event) => {
   else if (action === "dismiss-error") error = "";
   else if (action === "dismiss-notice") notice = "";
   else if (action === "close-detail") {
+    const previous = detailId;
     closeDetail();
+    render();
+    root
+      .querySelector<HTMLElement>(`[data-open="${CSS.escape(previous)}"]`)
+      ?.focus({ preventScroll: true });
+    return;
+  } else if (action === "reading-mode") {
+    readingMode = !readingMode;
+    if (readingMode) mobileDetail = true;
   } else if (action.startsWith("sort-")) {
     const next = action.slice(5) as Filters["sort"];
     filters.ascending =
       filters.sort === next ? !filters.ascending : next === "title";
     filters.sort = next;
     updateSessionFilters();
-  } else if (action.startsWith("tab-")) detailTab = action.slice(4);
+  } else if (action.startsWith("tab-"))
+    detailTab = action.slice(4) as SessionTab;
   else if (action.startsWith("review-") && catalog.mode !== "static") {
     reviews[detailId] = action.slice(7) as Review;
     if (catalog.paged) {
@@ -838,12 +861,24 @@ root.addEventListener("click", async (event) => {
   } else if (action === "conversation-retry") {
     await loadConversation(conversation?.offset ?? 0);
   } else if (action === "conversation-page" || action === "context-message") {
+    const sessionId = detailId;
     targetMessage =
       action === "context-message"
         ? Number(target.dataset.position)
         : undefined;
     detailTab = "conversation";
     await loadConversation(Number(target.dataset.offset));
+    if (
+      action === "context-message" &&
+      detailId === sessionId &&
+      detailTab === "conversation"
+    ) {
+      (
+        root.querySelector<HTMLElement>(
+          `article[data-position="${target.dataset.position}"]`,
+        ) ?? document.getElementById("tab-conversation")
+      )?.focus({ preventScroll: true });
+    }
   } else if (action === "note-add") {
     const session =
       activeSession ?? catalog.sessions.find((item) => item.id === detailId);
@@ -871,7 +906,11 @@ root.addEventListener("click", async (event) => {
     root.querySelector<HTMLDialogElement>("#note-dialog")?.close();
     render();
     return;
-  } else if (action === "copy" || action === "copy-context") {
+  } else if (
+    action === "copy" ||
+    action === "copy-context" ||
+    action === "copy-message"
+  ) {
     const session =
       activeSession ?? catalog.sessions.find((item) => item.id === detailId);
     if (session) {
@@ -879,7 +918,15 @@ root.addEventListener("click", async (event) => {
         if (action === "copy-context") {
           const page = conversation?.page ?? embeddedConversation(session);
           await copyText(contextMarkdown(session, page.context, language));
-          notice = t("copied");
+          notice = t("contextCopied");
+        } else if (action === "copy-message") {
+          const position = Number(target.dataset.position);
+          const page = conversation?.page ?? embeddedConversation(session);
+          const message = page.messages[position - page.offset];
+          if (message) {
+            await copyText(message.text);
+            if (detailId === session.id) copiedMessage = position;
+          }
         } else {
           await copyText(
             commandFor(session) || session.title || session.session_id,
@@ -887,7 +934,7 @@ root.addEventListener("click", async (event) => {
           copied = true;
         }
       } catch {
-        error = t("copyFailed");
+        error = t(action === "copy" ? "copyFailed" : "clipboardError");
       }
     }
   } else if (action === "refresh") {
@@ -912,19 +959,33 @@ root.addEventListener("keydown", (event) => {
     ["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)
   ) {
     event.preventDefault();
+    const index = sessionTabs.indexOf(detailTab);
+    const step = event.key === "ArrowLeft" ? -1 : 1;
     detailTab =
       event.key === "Home"
         ? "conversation"
         : event.key === "End"
           ? "details"
-          : detailTab === "conversation"
-            ? "details"
-            : "conversation";
+          : sessionTabs[
+              (index + step + sessionTabs.length) % sessionTabs.length
+            ];
     render();
     document.getElementById(`tab-${detailTab}`)?.focus();
   }
 });
 document.addEventListener("keydown", (event) => {
+  if (
+    event.key === "Escape" &&
+    readingMode &&
+    !event.defaultPrevented &&
+    !root.querySelector("dialog[open]")
+  ) {
+    event.preventDefault();
+    readingMode = false;
+    render();
+    root.querySelector<HTMLElement>('[data-action="reading-mode"]')?.focus();
+    return;
+  }
   if (
     event.ctrlKey ||
     event.metaKey ||

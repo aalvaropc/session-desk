@@ -18,6 +18,36 @@ test("demo supports search, provider filters and a visible conversation", async 
   await expect(page.getByTestId("copy-command")).toBeVisible();
 });
 
+test("reading mode expands the transcript and keeps its session and keyboard focus", async ({
+  page,
+}) => {
+  const panel = page.getByTestId("detail-panel");
+  const heading = panel.getByRole("heading").first();
+  const title = await heading.textContent();
+  const originalWidth = (await panel.boundingBox())!.width;
+  const enter = page.getByRole("button", { name: "Reading mode", exact: true });
+  await enter.click();
+  await expect(page.getByTestId("row-open").first()).toBeHidden();
+  expect((await panel.boundingBox())!.width).toBeGreaterThan(originalWidth);
+
+  const conversation = page.getByRole("tab", { name: "Conversation" });
+  await conversation.press("ArrowRight");
+  const context = page.getByRole("tab", { name: "Resume context" });
+  await expect(context).toBeFocused();
+  await context.press("End");
+  await expect(page.getByRole("tab", { name: "Details" })).toBeFocused();
+  await expect(page.getByRole("tabpanel")).toContainText("Session source");
+
+  await page.keyboard.press("Escape");
+  await expect(enter).toBeFocused();
+  await expect(page.getByTestId("row-open").first()).toBeVisible();
+  await expect(heading).toHaveText(title!);
+  await expect(page.getByRole("tab", { name: "Details" })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+});
+
 test("native buttons keep Space behavior and hidden selections are cleared", async ({
   page,
 }) => {

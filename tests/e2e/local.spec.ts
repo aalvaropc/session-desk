@@ -62,10 +62,18 @@ test("searches a saved transcript, copies context and creates a persistent linke
   await expect(page.locator(".message-hit mark")).toHaveText(
     "codex synthetic middle message 0",
   );
-  await page.getByText("Resume context", { exact: true }).click();
+  await page.getByRole("tab", { name: "Resume context" }).click();
   await page.getByRole("button", { name: "Copy context", exact: true }).click();
   expect(await page.evaluate(() => navigator.clipboard.readText())).toContain(
     "Last request",
+  );
+  await page.getByRole("tab", { name: "Conversation", exact: true }).click();
+  await page
+    .locator(".message-hit")
+    .getByRole("button", { name: "Copy message", exact: true })
+    .click();
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toContain(
+    "codex synthetic middle message 0",
   );
   await page
     .locator(".message-hit")

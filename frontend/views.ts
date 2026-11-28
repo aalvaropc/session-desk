@@ -10,9 +10,11 @@ import type {
   Review,
   Session,
   SessionPage,
+  SessionTab,
   TrashEntry,
   View,
 } from "./types.js";
+import { sessionTabs } from "./types.js";
 import {
   basename,
   escapeHTML as esc,
@@ -35,12 +37,14 @@ export interface ViewState {
   age: string;
   selected: Set<string>;
   detailId: string;
-  detailTab: string;
+  detailTab: SessionTab;
+  readingMode: boolean;
   mobileDetail: boolean;
   busy: boolean;
   notice: string;
   error: string;
   copied: boolean;
+  copiedMessage?: number;
   activeSession?: Session;
   conversation?: ConversationState;
   targetMessage?: number;
@@ -66,11 +70,13 @@ export function workspaceMarkup(state: ViewState): string {
     selected,
     detailId,
     detailTab,
+    readingMode,
     mobileDetail,
     busy,
     notice,
     error,
     copied,
+    copiedMessage,
     activeSession,
     conversation,
     targetMessage,
@@ -256,6 +262,10 @@ export function workspaceMarkup(state: ViewState): string {
     }
     return parts.join("") + esc(text.slice(offset));
   }
+  const sessionVariant = (session: Session): string =>
+    session.variant
+      ? { cli: "CLI", app: "App", ide: "IDE" }[session.variant]
+      : "";
   function conversationMarkup(session: Session): string {
     if (session.has_transcript === false)
       return `<p class="muted">${t("metadataOnly")}</p>`;
@@ -272,7 +282,15 @@ export function workspaceMarkup(state: ViewState): string {
       .map((message, index) => {
         const position = offset + index;
         const active = position === targetMessage;
-        return `<article class="message message-${message.role}${active ? " message-hit" : ""}" data-position="${position}" tabindex="-1"><header><span class="speaker-symbol">${message.role === "user" ? icon("terminal") : icon("pages")}</span><strong>${message.role === "user" ? t("you") : providerLabel(session.provider)}</strong><span class="message-number">${String(position + 1).padStart(2, "0")}</span></header><div class="message-text">${active ? highlighted(message.text) : esc(message.text)}</div>${catalog.mode !== "static" ? button("note-add", t("addNote"), undefined, `class="text-button message-action" data-position="${position}" ${disabled()}`) : ""}</article>`;
+        const didCopy = copiedMessage === position;
+        const copyLabel = t(didCopy ? "messageCopied" : "copyMessage");
+        const noteLabel = t("addNote");
+        return `<article class="message message-${message.role}${active ? " message-hit" : ""}" data-position="${position}" tabindex="-1">
+          <header><span class="message-number">#${position + 1}</span><strong>${message.role === "user" ? t("you") : providerLabel(session.provider)}</strong>
+            <div class="message-actions">${catalog.mode !== "static" ? button("note-add", noteLabel, "memory", `class="icon-button" title="${esc(noteLabel)}" data-position="${position}" ${disabled()}`) : ""}${button("copy-message", copyLabel, didCopy ? "check" : "copy", `class="icon-button" title="${esc(copyLabel)}" data-position="${position}"`)}</div>
+          </header>
+          <div class="message-text">${active ? highlighted(message.text) : esc(message.text)}</div>
+        </article>`;
       })
       .join("");
     const navigation =
@@ -288,8 +306,15 @@ export function workspaceMarkup(state: ViewState): string {
   }
   function sessionContext(): string {
     const context = conversation?.page?.context;
-    if (!context?.user && !context?.assistant) return "";
-    return `<details class="session-context" data-session="${esc(detailId)}"><summary>${t("resumeContext")}</summary>${(
+    if (!context?.user && !context?.assistant) {
+      const message = conversation?.loading
+        ? "loadingConversation"
+        : conversation?.failed
+          ? "conversationError"
+          : "contextUnavailable";
+      return `<p class="muted" role="status">${t(message)}</p>`;
+    }
+    return `<div class="session-context">${button("copy-context", t("copyContext"), "copy", 'class="secondary"')}${(
       ["user", "assistant"] as const
     )
       .map((role) => {
@@ -297,9 +322,38 @@ export function workspaceMarkup(state: ViewState): string {
         if (!message) return "";
         return `<section><h3>${t(role === "user" ? "lastRequest" : "lastReply")}</h3><p>${esc(message.text.length > 600 ? message.text.slice(0, 600) + "…" : message.text)}</p>${button("context-message", t("openMessage"), "arrow", `class="text-button" data-position="${message.position}" data-offset="${Math.floor(message.position / 40) * 40}"`)}</section>`;
       })
-      .join(
-        "",
-      )}${button("copy-context", t("copyContext"), "copy", 'class="secondary"')}</details>`;
+      .join("")}</div>`;
+  }
+  function sessionDetails(session: Session, count: number | null): string {
+    const number = (value: number | null): string =>
+      value == null ? "" : value.toLocaleString(language);
+    const source = session.activity_source;
+    return `<div class="session-details">
+      <section><h3>${t("conversation")}</h3>${metadata([
+        ["messageTotal", number(count)],
+        ["prompts", number(session.prompt_count)],
+        ["lastActivity", date(session.updated_at, true)],
+        ...(source
+          ? [
+              [
+                "activityDateSource",
+                t(source === "file" ? "dateFromFile" : "recordedActivity"),
+              ] as [TextKey, string],
+            ]
+          : []),
+      ])}</section>
+      <section><h3>${t("sessionSource")}</h3>${metadata([
+        ["provider", providerLabel(session.provider)],
+        ...(session.variant
+          ? [["variant", sessionVariant(session)] as [TextKey, string]]
+          : []),
+        ["project", session.project_path],
+        ["branch", session.branch],
+        ["sessionId", session.session_id],
+        ["file", session.file_path],
+        ["size", bytes(session.size_bytes)],
+      ])}</section>
+    </div>`;
   }
   function sessionDetail(session: Session): string {
     const command = commandFor(session);
@@ -307,25 +361,49 @@ export function workspaceMarkup(state: ViewState): string {
       conversation?.page && catalog.paged
         ? conversation.page.total
         : session.message_count;
-    const overview =
-      detailTab === "conversation"
-        ? conversationMarkup(session)
-        : metadata([
-            ["provider", providerLabel(session.provider)],
-            ["project", session.project_path],
-            ["branch", session.branch],
-            ["sessionId", session.session_id],
-            ["file", session.file_path],
-            ["modified", date(session.updated_at, true)],
-            ["size", bytes(session.size_bytes)],
-            [
-              "prompts",
-              session.prompt_count == null
-                ? t("unknownCount")
-                : String(session.prompt_count),
-            ],
-          ]);
-    return `<div class="detail-title">${providerBadge(session.provider)}<h2>${esc(sessionTitle(session))}</h2><div class="detail-meta"><span>${icon("folder")}${esc(basename(session.project_path) || t("unknownProject"))}</span>${session.branch ? `<span>${icon("branch")}${esc(session.branch)}</span>` : ""}${session.variant ? `<span>${{ cli: "CLI", app: "App", ide: "IDE" }[session.variant]}</span>` : ""}</div></div><div class="resume-box"><div><h3>${t("resume")}</h3><p>${t(command ? "commandHint" : session.variant === "app" ? "appResumeHint" : "ideResumeHint")}</p></div>${button("copy", t(copied ? "copied" : command ? "copyCommand" : "copyTitleId"), copied ? "check" : "copy", `class="primary" ${test("copy-command")}`)}${command ? `<code class="resume-command">${esc(command)}</code>` : ""}</div>${sessionContext()}<div class="detail-tabs" role="tablist" aria-label="${t("details")}">${(["conversation", "details"] as const).map((tab) => button(`tab-${tab}`, t(tab), undefined, `role="tab" id="tab-${tab}" aria-selected="${detailTab === tab}" aria-controls="tab-content" tabindex="${detailTab === tab ? 0 : -1}" class="${detailTab === tab ? "active" : ""}"`)).join("")}<span>${count == null ? "" : count + " " + t("messages")}</span></div><div class="detail-content" id="tab-content" role="tabpanel" aria-labelledby="tab-${detailTab}" tabindex="0">${overview}</div><div class="review-bar"><span>${t(session.provider === "antigravity" ? "antigravityReadOnly" : "review")}</span><div>${button("review-keep", t("keep"), "check", `class="review-button ${reviews[session.id] === "keep" ? "active" : ""}" ${test("review-keep")} aria-pressed="${reviews[session.id] === "keep"}" aria-label="${t("markKeep")}" ${disabled()}`)}${button("review-pending", t("pending"), "clock", `class="review-button ${reviews[session.id] !== "keep" ? "active" : ""}" ${test("review-pending")} aria-pressed="${reviews[session.id] !== "keep"}" aria-label="${t("markPending")}" ${disabled()}`)}</div></div>`;
+    const content = {
+      conversation: () => conversationMarkup(session),
+      resumeContext: sessionContext,
+      details: () => sessionDetails(session, count),
+    }[detailTab]();
+    const modeLabel = t(readingMode ? "exitReadingMode" : "readingMode");
+    const titleTag = readingMode ? "h1" : "h2";
+    const kept = reviews[session.id] === "keep";
+    const hint = t(
+      command
+        ? "commandHint"
+        : session.variant === "app"
+          ? "appResumeHint"
+          : "ideResumeHint",
+    );
+    return `<header class="session-header">
+      <div class="session-heading">
+        <div class="session-location">${providerBadge(session.provider)}${session.variant ? `<span class="session-variant">${sessionVariant(session)}</span>` : ""}<span class="session-project">${icon("folder")}${esc(basename(session.project_path) || t("unknownProject"))}</span>${session.branch ? `<span class="session-branch">${icon("branch")}${esc(session.branch)}</span>` : ""}</div>
+        <div class="session-header-actions">${button("close-detail", t("backList"), "back", 'class="mobile-back text-button"')}${button("reading-mode", modeLabel, readingMode ? "contract" : "expand", `class="text-button reading-toggle" ${readingMode ? 'aria-keyshortcuts="Escape"' : ""}`)}${button("close-detail", t("closeDetail"), "close", `class="icon-button close-detail" title="${t("closeDetail")}"`)}</div>
+        <${titleTag} title="${esc(sessionTitle(session))}">${esc(sessionTitle(session))}</${titleTag}>
+      </div>
+      <div class="session-resume">
+        ${command ? `<span class="session-command" title="${esc(hint + "\n" + command)}">${icon("terminal")}<code>${esc(command)}</code></span>` : `<p>${hint}</p>`}
+        ${button("copy", t(copied ? "copied" : command ? "copyCommand" : "copyTitleId"), copied ? "check" : "copy", `class="secondary" ${test("copy-command")}`)}
+      </div>
+    </header>
+    <div class="session-tabbar"><div class="detail-tabs" role="tablist" aria-label="${t("session")}">${sessionTabs
+      .map((tab) =>
+        button(
+          `tab-${tab}`,
+          t(tab),
+          undefined,
+          `role="tab" id="tab-${tab}" aria-selected="${detailTab === tab}" aria-controls="tab-content" tabindex="${detailTab === tab ? 0 : -1}" class="${detailTab === tab ? "active" : ""}"`,
+        ),
+      )
+      .join(
+        "",
+      )}</div>${count == null ? "" : `<span class="session-message-count">${count.toLocaleString(language)} ${t("messages")}</span>`}</div>
+    <div class="detail-content session-content" id="tab-content" role="tabpanel" aria-labelledby="tab-${detailTab}" tabindex="0"><div class="session-reading-column">${content}</div></div>
+    <div class="review-bar"><span>${t(session.provider === "antigravity" ? "antigravityReadOnly" : "review")}</span><div>
+      ${button("review-keep", t("keep"), "check", `class="review-button ${kept ? "active" : ""}" ${test("review-keep")} aria-pressed="${kept}" aria-label="${t("markKeep")}" ${disabled()}`)}
+      ${button("review-pending", t("pending"), "clock", `class="review-button ${!kept ? "active" : ""}" ${test("review-pending")} aria-pressed="${!kept}" aria-label="${t("markPending")}" ${disabled()}`)}
+    </div></div>`;
   }
   function memoryDetail(memory: Memory): string {
     const origin =
@@ -358,7 +436,12 @@ export function workspaceMarkup(state: ViewState): string {
         ? (activeSession ??
           catalog.sessions.find((session) => session.id === detailId))
         : catalog.memories.find((memory) => memory.id === detailId);
-    return `<aside class="detail-panel ${item ? "has-detail" : ""}" id="detail-panel" ${test("detail-panel")} aria-label="${t("details")}">${item ? `<div class="detail-topline">${button("close-detail", t("backList"), "back", 'class="mobile-back text-button"')}<span class="detail-section-label">${t(view === "sessions" ? "session" : "memory")}</span>${button("close-detail", t("closeDetail"), "close", `class="icon-button close-detail" aria-label="${t("closeDetail")}"`)}</div>${"session_id" in item ? sessionDetail(item) : memoryDetail(item)}` : `<div class="detail-placeholder">${icon("pages")}<h2>${t(view === "sessions" ? "detailPrompt" : "memoryPrompt")}</h2><p>${t(view === "sessions" ? "detailDescription" : "memoryDescription")}</p></div>`}</aside>`;
+    const content = item
+      ? "session_id" in item
+        ? sessionDetail(item)
+        : `<div class="detail-topline">${button("close-detail", t("backList"), "back", 'class="mobile-back text-button"')}<span class="detail-section-label">${t("memory")}</span>${button("close-detail", t("closeDetail"), "close", `class="icon-button close-detail" aria-label="${t("closeDetail")}"`)}</div>${memoryDetail(item)}`
+      : `<div class="detail-placeholder">${icon("pages")}<h2>${t(view === "sessions" ? "detailPrompt" : "memoryPrompt")}</h2><p>${t(view === "sessions" ? "detailDescription" : "memoryDescription")}</p></div>`;
+    return `<aside class="detail-panel ${item ? "has-detail" : ""}" id="detail-panel" ${test("detail-panel")} aria-label="${t("details")}">${content}</aside>`;
   }
   function activityMarkup(): string {
     return `<div class="toolbar"><div class="filters"><label><span class="sr-only">${t("activity")}</span><select id="activity-days">${selectOptions(
@@ -400,5 +483,5 @@ export function workspaceMarkup(state: ViewState): string {
     view === "activity"
       ? activityMarkup()
       : `${toolbar()}${selected.size ? `<div class="bulk-bar"><strong>${selected.size} ${t("selected")}</strong>${button("clear-selection", t("clearSelection"), undefined, 'class="text-button"')}${button("trash", t("moveTrash"), "trash", `class="danger-button" ${test("trash-selected")} ${filesDisabled()}`)}</div>` : ""}<div class="work-area ${view === "trash" ? "trash-area" : ""}">${list(items)}${view !== "trash" ? detail() : ""}</div>${view === "memories" ? notesMarkup() : ""}`;
-  return `${sidebar()}<main class="workspace ${mobileDetail ? "mobile-detail" : ""} ${view === "memories" && catalog.notes?.length ? "has-notes" : ""}"><header class="page-header"><div><h1>${t(view)}</h1><p>${t(descriptions[view])}</p></div><div class="header-actions">${catalog.mode === "local" ? button("refresh", t("refresh"), "refresh", `class="secondary" ${test("refresh")} ${busy || indexStatus ? "disabled" : ""}`) : ""}<span class="private-label">${icon("shield")}${t("privacy")}</span></div></header><div class="summary-strip"><span><strong>${counts[view]}</strong> ${t(view === "sessions" || view === "activity" ? "conversations" : view === "memories" ? "memoryCount" : "trashCount")}</span>${view === "sessions" ? `<span><strong>${projectOptions.length}</strong> ${t("projects")}</span><span class="summary-providers">Claude Code <span>·</span> Codex <span>·</span> Antigravity</span>` : ""}<span class="snapshot-date">${t("generated")} ${date(catalog.generated_at)}</span></div>${catalog.mode === "demo" ? `<div class="demo-banner"><span>${icon("terminal")}${t("demoBanner")}</span>${button("reset", t("resetDemo"), "refresh", `class="text-button" ${test("reset-demo")}`)}</div>` : catalog.mode === "static" ? `<div class="static-banner">${icon("shield")}${t("readOnly")}</div>` : ""}${error ? `<div class="notice error" role="alert"><span>${esc(error)}</span>${button("dismiss-error", t("dismiss"), "close", 'class="icon-button"')}</div>` : ""}${notice ? `<div class="notice success" role="status"><span>${esc(notice)}</span>${button("dismiss-notice", t("dismiss"), "close", 'class="icon-button"')}</div>` : ""}${indexProgress.phase === "error" ? `<p class="notice error" role="alert">${t("indexFailed")}</p>` : ""}${indexStatus ? `<p class="notice" role="status" data-testid="index-progress">${esc(indexStatus)}</p>` : ""}${catalog.warnings.length ? `<details class="warnings"><summary>${t("warnings")} (${catalog.warnings.length})</summary>${catalog.warnings.map((warning) => `<p>${esc(warning.message)}${warning.path ? `<code>${esc(warning.path)}</code>` : ""}</p>`).join("")}</details>` : ""}${layout}</main>${noteDialog()}<dialog id="trash-dialog" aria-labelledby="dialog-title"><form method="dialog"><div class="dialog-icon">${icon("trash")}</div><h2 id="dialog-title">${t("confirmTitle")}</h2><p>${selected.size} ${t("selected")}. ${t("confirmDescription")}</p><div class="dialog-actions"><button class="secondary" value="cancel" autofocus>${t("cancel")}</button><button type="button" data-action="confirm-trash" class="danger-button" ${test("confirm-trash")}>${t("confirmTrash")}</button></div></form></dialog>`;
+  return `${sidebar()}<main class="workspace ${view === "sessions" ? "sessions-workspace" : ""} ${readingMode && detailId ? "reader-expanded" : ""} ${mobileDetail ? "mobile-detail" : ""} ${view === "memories" && catalog.notes?.length ? "has-notes" : ""}"><header class="page-header"><div><h1>${t(view)}</h1><p>${t(descriptions[view])}</p></div><div class="header-actions">${catalog.mode === "local" ? button("refresh", t("refresh"), "refresh", `class="secondary" ${test("refresh")} ${busy || indexStatus ? "disabled" : ""}`) : ""}<span class="private-label">${icon("shield")}${t("privacy")}</span></div></header><div class="summary-strip"><span><strong>${counts[view]}</strong> ${t(view === "sessions" || view === "activity" ? "conversations" : view === "memories" ? "memoryCount" : "trashCount")}</span>${view === "sessions" ? `<span><strong>${projectOptions.length}</strong> ${t("projects")}</span><span class="summary-providers">Claude Code <span>·</span> Codex <span>·</span> Antigravity</span>` : ""}<span class="snapshot-date">${t("generated")} ${date(catalog.generated_at)}</span></div>${catalog.mode === "demo" ? `<div class="demo-banner"><span>${icon("terminal")}${t("demoBanner")}</span>${button("reset", t("resetDemo"), "refresh", `class="text-button" ${test("reset-demo")}`)}</div>` : catalog.mode === "static" ? `<div class="static-banner">${icon("shield")}${t("readOnly")}</div>` : ""}${error ? `<div class="notice error" role="alert"><span>${esc(error)}</span>${button("dismiss-error", t("dismiss"), "close", 'class="icon-button"')}</div>` : ""}${notice ? `<div class="notice success" role="status"><span>${esc(notice)}</span>${button("dismiss-notice", t("dismiss"), "close", 'class="icon-button"')}</div>` : ""}${indexProgress.phase === "error" ? `<p class="notice error" role="alert">${t("indexFailed")}</p>` : ""}${indexStatus ? `<p class="notice" role="status" data-testid="index-progress">${esc(indexStatus)}</p>` : ""}${catalog.warnings.length ? `<details class="warnings"><summary>${t("warnings")} (${catalog.warnings.length})</summary>${catalog.warnings.map((warning) => `<p>${esc(warning.message)}${warning.path ? `<code>${esc(warning.path)}</code>` : ""}</p>`).join("")}</details>` : ""}${layout}</main>${noteDialog()}<dialog id="trash-dialog" aria-labelledby="dialog-title"><form method="dialog"><div class="dialog-icon">${icon("trash")}</div><h2 id="dialog-title">${t("confirmTitle")}</h2><p>${selected.size} ${t("selected")}. ${t("confirmDescription")}</p><div class="dialog-actions"><button class="secondary" value="cancel" autofocus>${t("cancel")}</button><button type="button" data-action="confirm-trash" class="danger-button" ${test("confirm-trash")}>${t("confirmTrash")}</button></div></form></dialog>`;
 }
