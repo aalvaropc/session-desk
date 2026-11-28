@@ -128,3 +128,25 @@ test("opens Antigravity CLI, App and IDE and drills into activity", async ({
     "agy --conversation",
   );
 });
+
+test("shows indexing status while browsing the cached catalog", async ({
+  page,
+}) => {
+  let indexing = true;
+  await page.route("**/api/progress", (route) =>
+    indexing
+      ? route.fulfill({ json: { phase: "index", completed: 2, total: 15 } })
+      : route.continue(),
+  );
+  await page.goto("http://127.0.0.1:8768");
+  await page.getByTestId("language-select").selectOption("en");
+  await expect(page.getByTestId("index-progress")).toHaveText(
+    "Indexing conversations · 2 / 15",
+  );
+  await expect(page.getByTestId("session-row")).toHaveCount(15);
+  await expect(page.getByTestId("copy-command")).toBeEnabled();
+  await expect(page.getByTestId("refresh")).toBeDisabled();
+  indexing = false;
+  await expect(page.getByTestId("index-progress")).toHaveCount(0);
+  await expect(page.getByTestId("refresh")).toBeEnabled();
+});

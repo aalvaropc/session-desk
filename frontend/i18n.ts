@@ -29,6 +29,10 @@ const en = {
   sourceUnavailable: "The original message is unavailable.",
   openMessage: "Open message",
   loadingSessions: "Loading sessions…",
+  scanningHistory:
+    "Scanning local history. The first scan can take a few minutes.",
+  indexingHistory: "Indexing conversations",
+  indexFailed: "Could not update the history. Use Refresh to try again.",
   noteSaved: "Note saved",
   noActivity: "No sessions in this period.",
   unknownCount: "Unknown",
@@ -185,6 +189,11 @@ const es: Record<TextKey, string> = {
   sourceUnavailable: "El mensaje de origen no está disponible.",
   openMessage: "Abrir mensaje",
   loadingSessions: "Cargando sesiones…",
+  scanningHistory:
+    "Leyendo el historial local. La primera lectura puede tardar unos minutos.",
+  indexingHistory: "Indexando conversaciones",
+  indexFailed:
+    "No se pudo actualizar el historial. Pulsa Actualizar para reintentar.",
   noteSaved: "Nota guardada",
   noActivity: "No hay sesiones en este período.",
   unknownCount: "Desconocido",

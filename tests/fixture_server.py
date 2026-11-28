@@ -27,7 +27,9 @@ with demo_store() as store:
                     }
                 stream.write(json.dumps(record) + "\n")
         os.utime(path, ns=(original.st_atime_ns, original.st_mtime_ns))
-    server = make_server(store, port=8768)
+    server = make_server(
+        store, port=8768, index_path=store.roots["antigravity"].parent / "workspace.sqlite3"
+    )
     try:
         server.serve_forever()
     except KeyboardInterrupt:

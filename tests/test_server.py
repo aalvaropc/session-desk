@@ -22,10 +22,10 @@ class ServerTests(unittest.TestCase):
         self.addCleanup(server.server_close)
         self.assertEqual(server.server_name, "127.0.0.1")
 
-    def start_server(self):
+    def start_server(self, index_path=None):
         from session_desk.server import make_server
 
-        self.server = make_server(self.store(), port=0)
+        self.server = make_server(self.store(), port=0, index_path=index_path)
         thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         thread.start()
         self.addCleanup(self.server.server_close)
@@ -127,6 +127,96 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(self.request("GET", "/")[0], 200)
         finally:
             idle.close()
+
+    def test_initial_page_and_index_progress_respond_while_catalog_is_busy(self):
+        self.start_server()
+        with self.server.store_lock:
+            self.server.index_progress = {"phase": "index", "completed": 2, "total": 10}
+            self.assertEqual(self.request("GET", "/")[0], 200)
+            self.assertEqual(self.request("GET", "/api/progress")[0], 403)
+            status, body = self.request("GET", "/api/progress", headers=self.headers())
+            self.assertEqual(status, 200)
+            self.assertEqual(json.loads(body), self.server.index_progress)
+
+    def test_saved_conversation_is_available_during_a_background_refresh(self):
+        from pathlib import Path
+
+        from session_desk.services.workspace import Workspace
+
+        path = claude_session(self.claude, text="saved message")
+        index = Path(self.claude).parent / "workspace.sqlite3"
+        with Workspace(self.store(), index) as workspace:
+            workspace.refresh()
+            identifier = next(iter(workspace.rows))
+        path = Path(path)
+        entered = threading.Event()
+        release = threading.Event()
+        write_session = Workspace.write_session
+
+        def slow_write(workspace, *args, **kwargs):
+            result = write_session(workspace, *args, **kwargs)
+            entered.set()
+            if not release.wait(6):
+                raise RuntimeError("Did not release the background scan")
+            return result
+
+        self.start_server(index)
+        with path.open("a", encoding="utf-8") as stream:
+            stream.write('{"type":"assistant","message":{"content":"new message"}}\n')
+        with patch.object(Workspace, "write_session", slow_write):
+            try:
+                self.assertEqual(
+                    self.request("GET", "/api/catalog?cached=1", headers=self.headers())[0], 200
+                )
+                self.assertTrue(entered.wait(3))
+                status, body = self.request(
+                    "GET", "/api/search?q=saved%20message", headers=self.headers()
+                )
+                self.assertEqual(status, 200)
+                self.assertEqual(json.loads(body)["total"], 1)
+                status, body = self.request(
+                    "GET", "/api/search?q=new%20message", headers=self.headers()
+                )
+                self.assertEqual(status, 200)
+                self.assertEqual(json.loads(body)["total"], 0)
+                status, body = self.request(
+                    "GET", f"/api/sessions/{identifier}/messages", headers=self.headers()
+                )
+                self.assertEqual(status, 200)
+                self.assertNotIn("new message", str(json.loads(body)["messages"]))
+                status, body = self.request("POST", "/api/reviews", {"reviews": {}}, self.headers())
+                self.assertEqual(status, 409)
+                self.assertEqual(json.loads(body)["code"], "index_in_progress")
+            finally:
+                release.set()
+        self.server.index_thread.join(timeout=4)
+        self.assertFalse(self.server.index_thread.is_alive())
+        status, body = self.request("GET", "/api/search?q=new%20message", headers=self.headers())
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["total"], 1)
+
+    def test_failed_initial_refresh_protects_cached_session_from_trash(self):
+        from pathlib import Path
+
+        from session_desk.services.workspace import Workspace
+
+        path = claude_session(self.claude)
+        index = Path(self.claude).parent / "workspace.sqlite3"
+        with Workspace(self.store(), index) as workspace:
+            workspace.refresh()
+            row = next(iter(workspace.rows.values()))
+        self.start_server(index)
+        with patch.object(Workspace, "refresh", side_effect=OSError("index write failed")):
+            self.assertEqual(
+                self.request("GET", "/api/catalog?cached=1", headers=self.headers())[0], 200
+            )
+            self.server.index_thread.join(timeout=4)
+            self.assertFalse(self.server.index_thread.is_alive())
+        payload = {"ids": [row.id], "versions": {row.id: row.version}}
+        status, body = self.request("POST", "/api/trash", payload, self.headers())
+        self.assertEqual(status, 409)
+        self.assertEqual(json.loads(body)["code"], "index_not_ready")
+        self.assertTrue(path.exists())
 
     def test_http_trash_restore_and_stale_snapshot(self):
         path = claude_session(self.claude)

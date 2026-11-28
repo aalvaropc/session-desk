@@ -3,6 +3,7 @@ from __future__ import annotations
 import collections
 import datetime
 import os
+from typing import Callable
 
 from ..models import Message
 from .common import timestamp
@@ -22,7 +23,15 @@ def load_history(path=None) -> dict:
     return hist
 
 
-def extract(path: str, hist: dict, grep: str | None = None) -> dict:
+def extract(
+    path: str,
+    hist: dict,
+    grep: str | None = None,
+    *,
+    dialogue: list[Message] | None = None,
+    previews: bool = True,
+    checkpoint: Callable[[], None] | None = None,
+) -> dict:
     sid = os.path.basename(path)[:-6]
     st = os.stat(path)
     title = first = cwd = branch = None
@@ -33,14 +42,17 @@ def extract(path: str, hist: dict, grep: str | None = None) -> dict:
     tail: collections.deque[dict] = collections.deque(maxlen=150)
     from .common import readable, records, snippet, text_content
 
-    for i, obj in enumerate(records(path)):
+    for i, obj in enumerate(records(path, checkpoint=checkpoint)):
         typ = obj.get("type")
         if typ in ("user", "assistant"):
             n_msgs += 1
             activity = max(activity, timestamp(obj.get("timestamp")))
-            tail.append(obj)
+            if previews:
+                tail.append(obj)
             message = obj.get("message")
             txt = text_content(message.get("content")) if isinstance(message, dict) else ""
+            if dialogue is not None and readable(txt):
+                dialogue.append({"role": typ, "text": txt.strip().replace("\r", "")})
             if needle and match is None:
                 match = snippet(txt, needle) or None
         if typ == "custom-title":

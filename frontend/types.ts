@@ -58,6 +58,8 @@ export interface Bootstrap {
   sessions: Session[];
   paged?: boolean;
   workspace_id?: string;
+  background_index?: boolean;
+  index_revision?: number;
   notes?: Note[];
   memories: Memory[];
   trash: TrashEntry[];
@@ -81,6 +83,9 @@ export interface SessionPage {
   catalog_total: number;
   projects: string[];
 }
+export type IndexProgress =
+  | { phase: "idle" | "scan" | "error"; revision?: number }
+  | { phase: "index"; completed: number; total: number; revision?: number };
 export interface ContextMessage {
   position: number;
   text: string;

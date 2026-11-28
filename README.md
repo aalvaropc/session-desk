@@ -46,7 +46,10 @@ parent directory.
 ## Local storage
 
 The live workspace keeps a searchable copy of readable messages under Session Desk's
-private local state directory. Refresh incorporates changes from the providers.
+private local state directory. The saved catalog is available while Session Desk checks
+for changed transcripts in the background. Refresh starts another check, and the panel
+shows progress during the update. Searches and reading remain available when a saved
+catalog exists. Reviews, notes and trash changes resume after the update completes.
 Run `session-desk stop` and then `session-desk reindex` to rebuild the searchable copy.
 Pass the same custom provider roots when applicable. Reindex retains saved reviews and
 notes. HTML exports can contain private text and include conversation previews.

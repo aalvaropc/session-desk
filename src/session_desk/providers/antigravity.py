@@ -6,6 +6,7 @@ import re
 import sqlite3
 from contextlib import closing
 from pathlib import Path
+from typing import Callable
 from urllib.parse import urlsplit
 from urllib.request import url2pathname
 
@@ -34,10 +35,12 @@ def project_path(value: object) -> str:
     return ""
 
 
-def read_steps(path: Path) -> tuple[list[Message], float]:
+def read_steps(
+    path: Path, *, checkpoint: Callable[[], None] | None = None
+) -> tuple[list[Message], float]:
     messages: list[Message] = []
     latest = 0.0
-    for step in records(path):
+    for step in records(path, checkpoint=checkpoint):
         role = {"USER_INPUT": "user", "PLANNER_RESPONSE": "assistant"}.get(str(step.get("type")))
         content = step.get("content")
         if role and isinstance(content, str) and content.strip():
@@ -66,7 +69,15 @@ def summaries(path: Path) -> dict[str, sqlite3.Row]:
         }
 
 
-def discover(state, grep: str | None = None, *, previews: bool = True) -> list[Session]:
+def discover(
+    state,
+    grep: str | None = None,
+    *,
+    previews: bool = True,
+    known: dict[str, Session] | None = None,
+    consume: Callable[[Session, list[Message], float], None] | None = None,
+    checkpoint: Callable[[], None] | None = None,
+) -> list[Session]:
     sessions = []
     home = state.roots["antigravity"]
     for variant, directory in VARIANTS.items():
@@ -91,6 +102,8 @@ def discover(state, grep: str | None = None, *, previews: bool = True) -> list[S
             if path.suffix in (".db", ".pb") and NATIVE_ID.fullmatch(path.stem)
         }
         for sid in sorted(folders.keys() | metadata.keys() | opaque.keys()):
+            if checkpoint is not None:
+                checkpoint()
             logs = folders.get(sid)
             transcript = next(
                 (logs / name for name in TRANSCRIPTS if logs and (logs / name).is_file()), None
@@ -100,16 +113,21 @@ def discover(state, grep: str | None = None, *, previews: bool = True) -> list[S
             try:
                 state.safe(source, home)
                 fingerprint = state.fingerprint(source)
+                version = ":".join(map(str, fingerprint)) + ":" + source.name
+                identifier = state.identifier("antigravity", root / "brain" / sid)
+                previous = (known or {}).get(identifier)
+                changed = previous is None or previous.version != version
                 cache_key = str(source)
                 cached = state.cache.get(cache_key) if transcript and (previews or grep) else None
                 if cached and cached[0] == fingerprint:
                     messages, latest = cached[2]
-                elif transcript and (previews or grep):
-                    messages, latest = read_steps(transcript)
+                elif transcript and (previews or grep or (consume is not None and changed)):
+                    messages, latest = read_steps(transcript, checkpoint=checkpoint)
                     if state.fingerprint(source) != fingerprint:
                         state.warn("changed_during_scan", "File changed during scan", source)
                         continue
-                    state.cache[cache_key] = (fingerprint, None, (messages, latest))
+                    if previews and consume is None:
+                        state.cache[cache_key] = (fingerprint, None, (messages, latest))
                 else:
                     messages, latest = [], 0.0
                 first = next(
@@ -128,7 +146,7 @@ def discover(state, grep: str | None = None, *, previews: bool = True) -> list[S
                     "",
                 )
                 session = Session(
-                    id=state.identifier("antigravity", root / "brain" / sid),
+                    id=identifier,
                     session_id=sid,
                     provider="antigravity",
                     title=title[:300] if isinstance(title, str) else "",
@@ -145,15 +163,18 @@ def discover(state, grep: str | None = None, *, previews: bool = True) -> list[S
                     else None,
                     messages=[
                         {"role": message["role"], "text": message["text"][:600]}
-                        for message in messages[-10:]
+                        for message in (messages[-10:] if previews else [])
                     ],
                     match=hit,
-                    version=":".join(map(str, fingerprint)) + ":" + source.name,
+                    version=version,
                     variant=variant,
                     has_transcript=transcript is not None,
                     activity_source="recorded" if observed else "file",
                 )
-                sessions.append(session)
             except (OSError, ValueError) as error:
                 state.warn("antigravity_read", error, source)
+                continue
+            if changed and consume is not None:
+                consume(session, messages, latest)
+            sessions.append(session)
     return sessions
