@@ -1,8 +1,9 @@
 import json
+import os
 import sqlite3
 import tempfile
 import unittest
-from contextlib import closing
+from contextlib import closing, contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -130,6 +131,7 @@ class WorkspaceTests(unittest.TestCase):
             self.assertEqual(workspace.page(query="needle")["total"], 51)
 
     def test_concurrent_write_preserves_last_readable_snapshot(self):
+        from session_desk.providers import antigravity
         from session_desk.services.workspace import Workspace
 
         transcript = self.antigravity("antigravity-cli")
@@ -139,12 +141,20 @@ class WorkspaceTests(unittest.TestCase):
             saved = workspace.page(query="words/middle")["sessions"][0]
         with transcript.open("a", encoding="utf-8") as stream:
             stream.write('\n{"type":"USER_INPUT","content":"new synthetic turn"}\n')
+        read_steps = antigravity.read_steps
+
+        def append_during_scan(path, **options):
+            result = read_steps(path, **options)
+            with path.open("a", encoding="utf-8") as stream:
+                stream.write("\n")
+            return result
+
         with Workspace(self.store, index) as workspace:
-            with patch.object(self.store, "conversation", side_effect=ValueError("changed")):
+            with patch.object(antigravity, "read_steps", side_effect=append_during_scan):
                 workspace.refresh()
             previous = workspace.page(query="words/middle")["sessions"][0]
             self.assertEqual(previous["version"], saved["version"])
-            self.assertTrue(workspace.warnings)
+            self.assertEqual(self.store.warnings[0].code, "changed_during_scan")
             workspace.refresh()
             self.assertEqual(workspace.page(query="new synthetic turn")["total"], 1)
 
@@ -163,3 +173,89 @@ class WorkspaceTests(unittest.TestCase):
             hit = workspace.page(query="older answer")["sessions"][0]
             self.assertEqual(hit["hit"]["position"], 0)
             self.assertIn("\ufffd", hit["hit"]["snippet"])
+
+    def test_reads_each_changed_transcript_once_and_skips_unchanged_files_after_restart(self):
+        from session_desk.providers import common
+        from session_desk.services.workspace import Workspace
+
+        project = self.root / "claude" / "projects" / "sample"
+        project.mkdir(parents=True)
+        transcript = project / "story.jsonl"
+        transcript.write_text('{"type":"user","message":{"content":"first"}}\n', encoding="utf-8")
+        index = self.root / "workspace.sqlite3"
+        with patch.object(common, "records", wraps=common.records) as reads:
+            with Workspace(self.store, index) as workspace:
+                workspace.refresh()
+                self.assertEqual(workspace.page(query="first")["total"], 1)
+            self.assertEqual(reads.call_count, 1)
+            reads.reset_mock()
+            reopened = SessionStore(self.root / "claude", self.root / "codex", self.agy)
+            with Workspace(reopened, index) as workspace:
+                self.assertEqual(workspace.page(query="first")["total"], 1)
+                workspace.refresh()
+                self.assertEqual(reads.call_count, 0)
+                with transcript.open("a", encoding="utf-8") as output:
+                    output.write('{"type":"assistant","message":{"content":"second"}}\n')
+                workspace.refresh()
+                self.assertEqual(reads.call_count, 1)
+                self.assertEqual(workspace.page(query="second")["total"], 1)
+
+    def test_initial_import_publishes_newest_then_resumes_from_the_saved_batch(self):
+        from session_desk.providers import common
+        from session_desk.services.workspace import Workspace
+
+        project = self.root / "claude" / "projects" / "sample"
+        project.mkdir(parents=True)
+        for filename, modified in (("old", 1000000000), ("new", 1000000001)):
+            path = project / f"{filename}.jsonl"
+            path.write_text(
+                json.dumps({"type": "user", "message": {"content": f"{filename} message"}}) + "\n",
+                encoding="utf-8",
+            )
+            os.utime(path, (modified, modified))
+        index = self.root / "progressive.sqlite3"
+
+        @contextmanager
+        def interrupt_after_first_batch(workspace):
+            yield
+            self.assertEqual(workspace.page(query="new message")["total"], 1)
+            self.assertEqual(workspace.page(query="old message")["total"], 0)
+            raise InterruptedError
+
+        with Workspace(self.store, index) as workspace:
+            with self.assertRaises(InterruptedError):
+                workspace.refresh(publish_partial=interrupt_after_first_batch)
+
+        with Workspace(self.store, index) as workspace:
+            self.assertTrue(workspace.needs_initial_import())
+            self.assertEqual(workspace.page(query="new message")["total"], 1)
+            with patch.object(common, "records", wraps=common.records) as reads:
+                workspace.refresh()
+                self.assertEqual(reads.call_count, 1)
+            self.assertEqual(workspace.page(query="old message")["total"], 1)
+            self.assertFalse(workspace.needs_initial_import())
+
+    def test_project_filter_includes_descendants_and_recovers_a_claude_folder_without_cwd(self):
+        from session_desk.services.workspace import Workspace
+
+        project = self.root / "SamurAI"
+        project.mkdir()
+        bucket = self.root / "claude" / "projects" / "-synthetic-SamurAI"
+        bucket.mkdir(parents=True)
+        for filename, path in (
+            ("root", None),
+            ("worktree", project / "worktrees" / "feature"),
+            ("sibling", project.with_name("SamurAI-archive")),
+        ):
+            record = {"type": "user", "message": {"content": filename}}
+            if path is not None:
+                record["cwd"] = str(path)
+            (bucket / f"{filename}.jsonl").write_text(json.dumps(record) + "\n", encoding="utf-8")
+        index = self.root / "project-test.sqlite3"
+        with Workspace(self.store, index) as workspace:
+            workspace.refresh()
+        with patch("session_desk.providers.claude.slug_to_path_guess", return_value=str(project)):
+            with Workspace(self.store, index) as workspace:
+                workspace.refresh()
+                results = workspace.page(project=str(project))["sessions"]
+                self.assertEqual({row["session_id"] for row in results}, {"root", "worktree"})

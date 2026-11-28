@@ -4,7 +4,7 @@ import datetime
 import json
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 SURROGATE = re.compile("[\ud800-\udfff]")
 
@@ -19,9 +19,11 @@ def clean_json(value: Any) -> Any:
     return value
 
 
-def records(path):
+def records(path, *, checkpoint: Callable[[], None] | None = None):
     with Path(path).open(encoding="utf-8", errors="replace") as stream:
-        for line in stream:
+        for index, line in enumerate(stream):
+            if checkpoint is not None and index % 128 == 0:
+                checkpoint()
             try:
                 obj = json.loads(line)
                 if r"\u" in line:

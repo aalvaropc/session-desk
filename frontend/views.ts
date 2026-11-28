@@ -3,6 +3,7 @@ import type {
   ActivityGroup,
   ConversationState,
   Filters,
+  IndexProgress,
   Language,
   Memory,
   NoteDraft,
@@ -46,6 +47,7 @@ export interface ViewState {
   sessionPage?: SessionPage;
   pageOffset: number;
   listPending: boolean;
+  indexProgress: IndexProgress;
   activity: ActivityGroup[];
   activityDays: number;
   noteDraft?: NoteDraft;
@@ -75,6 +77,7 @@ export function workspaceMarkup(state: ViewState): string {
     sessionPage,
     pageOffset,
     listPending,
+    indexProgress,
     activity,
     activityDays,
     noteDraft,
@@ -82,8 +85,12 @@ export function workspaceMarkup(state: ViewState): string {
   } = state;
   const t = (key: TextKey): string => translate(language, key);
   const test = (name: string): string => `data-testid="${name}"`;
+  const indexing =
+    indexProgress.phase === "scan" || indexProgress.phase === "index";
   const disabled = (): string =>
-    busy || catalog.mode === "static" ? "disabled" : "";
+    busy || indexing || catalog.mode === "static" ? "disabled" : "";
+  const filesDisabled = (): string =>
+    catalog.background_index && !catalog.index_ready ? "disabled" : disabled();
   const button = (
     action: string,
     label: string,
@@ -203,7 +210,7 @@ export function workspaceMarkup(state: ViewState): string {
       ? item.hit?.snippet || item.first_message
       : item.description;
     const readOnly = session && item.provider === "antigravity";
-    return `<article class="item-row ${detailId === item.id ? "is-open" : ""} ${selected.has(item.id) ? "is-selected" : ""}" data-id="${esc(item.id)}" ${test(session ? "session-row" : "memory-row")}><label class="row-check"><input type="checkbox" data-select="${esc(item.id)}" ${test("row-select")} aria-label="${esc(t("selectItem") + ": " + title)}" ${selected.has(item.id) ? "checked" : ""} ${readOnly || (listPending && session) ? "disabled" : disabled()}></label><button type="button" class="row-open" data-open="${esc(item.id)}" ${test("row-open")} aria-expanded="${detailId === item.id}" aria-controls="detail-panel"><span class="row-top">${providerBadge(item.provider)}<time datetime="${esc(item.updated_at)}">${date(item.updated_at)}</time></span><span class="row-title">${esc(title)}</span><span class="row-preview">${esc(subtitle)}</span><span class="row-bottom"><span class="row-project">${icon("folder")}${esc(basename(item.project_path) || t("unknownProject"))}</span>${session ? `<span class="message-count">${item.message_count === null ? t("unknownCount") : item.message_count + " " + t("messages")}</span><span class="review-badge ${(reviews[item.id] ?? "pending") === "keep" ? "kept" : ""}">${icon(reviews[item.id] === "keep" ? "check" : "clock")}${t(reviews[item.id] === "keep" ? "keep" : "pending")}</span>` : `<span class="memory-type">${esc(item.memory_type)}</span>${isStale(item) ? `<span class="stale-badge">${t("stale")}</span>` : ""}`}</span></button></article>`;
+    return `<article class="item-row ${detailId === item.id ? "is-open" : ""} ${selected.has(item.id) ? "is-selected" : ""}" data-id="${esc(item.id)}" ${test(session ? "session-row" : "memory-row")}><label class="row-check"><input type="checkbox" data-select="${esc(item.id)}" ${test("row-select")} aria-label="${esc(t("selectItem") + ": " + title)}" ${selected.has(item.id) ? "checked" : ""} ${readOnly || (listPending && session) ? "disabled" : filesDisabled()}></label><button type="button" class="row-open" data-open="${esc(item.id)}" ${test("row-open")} aria-expanded="${detailId === item.id}" aria-controls="detail-panel"><span class="row-top">${providerBadge(item.provider)}<time datetime="${esc(item.updated_at)}">${date(item.updated_at)}</time></span><span class="row-title">${esc(title)}</span><span class="row-preview">${esc(subtitle)}</span><span class="row-bottom"><span class="row-project">${icon("folder")}${esc(basename(item.project_path) || t("unknownProject"))}</span>${session ? `<span class="message-count">${item.message_count === null ? t("unknownCount") : item.message_count + " " + t("messages")}</span><span class="review-badge ${(reviews[item.id] ?? "pending") === "keep" ? "kept" : ""}">${icon(reviews[item.id] === "keep" ? "check" : "clock")}${t(reviews[item.id] === "keep" ? "keep" : "pending")}</span>` : `<span class="memory-type">${esc(item.memory_type)}</span>${isStale(item) ? `<span class="stale-badge">${t("stale")}</span>` : ""}`}</span></button></article>`;
   }
   function emptyState(filtered: boolean): string {
     return `<div class="empty-state">${icon(view === "sessions" ? "sessions" : view === "memories" ? "memory" : "trash")}<h2>${t(filtered ? "noResults" : "empty")}</h2><p>${t(filtered ? "noResultsDescription" : view === "sessions" ? "emptySessions" : view === "memories" ? "emptyMemories" : "emptyTrash")}</p>${filtered ? button("clear-filters", t("clearFilters"), undefined, 'class="secondary"') : ""}</div>`;
@@ -222,11 +229,11 @@ export function workspaceMarkup(state: ViewState): string {
       age !== "all",
     );
     if (view === "trash")
-      return `<section class="trash-list" aria-label="${t("trash")}">${items.length ? (items as TrashEntry[]).map((item) => `<article class="trash-row" data-id="${esc(item.id)}">${icon(item.kind === "session" ? "sessions" : "memory")}<div><h2>${esc(item.title)}</h2><p>${providerLabel(item.provider)}<span>·</span>${esc(basename(item.project_path))}<span>·</span>${t("deleted")} ${date(item.deleted_at)}</p></div>${button("restore", t("restore"), "refresh", `${test("restore-item")} data-id="${esc(item.id)}" class="secondary" ${disabled()}`)}</article>`).join("") : emptyState(hasFilters)}</section>`;
+      return `<section class="trash-list" aria-label="${t("trash")}">${items.length ? (items as TrashEntry[]).map((item) => `<article class="trash-row" data-id="${esc(item.id)}">${icon(item.kind === "session" ? "sessions" : "memory")}<div><h2>${esc(item.title)}</h2><p>${providerLabel(item.provider)}<span>·</span>${esc(basename(item.project_path))}<span>·</span>${t("deleted")} ${date(item.deleted_at)}</p></div>${button("restore", t("restore"), "refresh", `${test("restore-item")} data-id="${esc(item.id)}" class="secondary" ${filesDisabled()}`)}</article>`).join("") : emptyState(hasFilters)}</section>`;
     const selectable = items.filter(
       (item) => item.provider !== "antigravity",
     ).length;
-    return `<section class="item-list" aria-label="${t(view)}"><div class="list-heading"><label class="select-all"><input type="checkbox" ${test("select-all")} id="select-all" aria-label="${t("selectAll")}" ${selectable && selected.size === selectable ? "checked" : ""} ${!selectable || (view === "sessions" && listPending) ? "disabled" : disabled()}></label><span>${view === "sessions" && listPending ? t("loadingSessions") : `${sessionPage && view === "sessions" ? sessionPage.total : items.length} ${t("visible")}`}</span><div class="sort-controls">${button("sort-title", t("title"), undefined, `class="sort-button ${filters.sort === "title" ? "current" : ""}" aria-label="${t("title")}, ${t(filters.ascending ? "ascending" : "descending")}"`)}${button("sort-updated", t("updated"), "sort", `class="sort-button ${filters.sort === "updated" ? "current" : ""}" ${test("sort-updated")} aria-label="${t("updated")}, ${t(filters.ascending ? "ascending" : "descending")}"`)}</div></div><div class="list-scroll">${view === "sessions" && listPending ? "" : items.length ? (items as (Session | Memory)[]).map(row).join("") : emptyState(hasFilters)}</div>${pagination()}<div class="list-footer">${icon("check")}<span>${t("selectToManage")}</span></div></section>`;
+    return `<section class="item-list" aria-label="${t(view)}"><div class="list-heading"><label class="select-all"><input type="checkbox" ${test("select-all")} id="select-all" aria-label="${t("selectAll")}" ${selectable && selected.size === selectable ? "checked" : ""} ${!selectable || (view === "sessions" && listPending) ? "disabled" : filesDisabled()}></label><span>${view === "sessions" && listPending ? t("loadingSessions") : `${sessionPage && view === "sessions" ? sessionPage.total : items.length} ${t("visible")}`}</span><div class="sort-controls">${button("sort-title", t("title"), undefined, `class="sort-button ${filters.sort === "title" ? "current" : ""}" aria-label="${t("title")}, ${t(filters.ascending ? "ascending" : "descending")}"`)}${button("sort-updated", t("updated"), "sort", `class="sort-button ${filters.sort === "updated" ? "current" : ""}" ${test("sort-updated")} aria-label="${t("updated")}, ${t(filters.ascending ? "ascending" : "descending")}"`)}</div></div><div class="list-scroll">${view === "sessions" && listPending ? "" : items.length ? (items as (Session | Memory)[]).map(row).join("") : emptyState(hasFilters)}</div>${pagination()}<div class="list-footer">${icon("check")}<span>${t("selectToManage")}</span></div></section>`;
   }
   function metadata(items: [TextKey, string][]): string {
     return `<dl class="metadata">${items.map(([key, value]) => `<div><dt>${t(key)}</dt><dd>${esc(value || "—")}</dd></div>`).join("")}</dl>`;
@@ -265,7 +272,7 @@ export function workspaceMarkup(state: ViewState): string {
       .map((message, index) => {
         const position = offset + index;
         const active = position === targetMessage;
-        return `<article class="message message-${message.role}${active ? " message-hit" : ""}" data-position="${position}" tabindex="-1"><header><span class="speaker-symbol">${message.role === "user" ? icon("terminal") : icon("pages")}</span><strong>${message.role === "user" ? t("you") : providerLabel(session.provider)}</strong><span class="message-number">${String(position + 1).padStart(2, "0")}</span></header><div class="message-text">${active ? highlighted(message.text) : esc(message.text)}</div>${catalog.mode !== "static" ? button("note-add", t("addNote"), undefined, `class="text-button message-action" data-position="${position}"`) : ""}</article>`;
+        return `<article class="message message-${message.role}${active ? " message-hit" : ""}" data-position="${position}" tabindex="-1"><header><span class="speaker-symbol">${message.role === "user" ? icon("terminal") : icon("pages")}</span><strong>${message.role === "user" ? t("you") : providerLabel(session.provider)}</strong><span class="message-number">${String(position + 1).padStart(2, "0")}</span></header><div class="message-text">${active ? highlighted(message.text) : esc(message.text)}</div>${catalog.mode !== "static" ? button("note-add", t("addNote"), undefined, `class="text-button message-action" data-position="${position}" ${disabled()}`) : ""}</article>`;
       })
       .join("");
     const navigation =
@@ -371,12 +378,18 @@ export function workspaceMarkup(state: ViewState): string {
           `${note.title} ${note.body}`.toLocaleLowerCase().includes(query),
       ) ?? [];
     if (!notes.length) return "";
-    return `<section class="analysis-groups" aria-label="${t("notes")}"><h2>${t("notes")}</h2>${notes.map((note) => `<article class="analysis-group note"><h3>${esc(note.title)}</h3><p>${esc(note.body)}</p><div>${note.source_available ? button("origin", t("openMessage"), "arrow", `data-id="${esc(note.session_id)}" data-position="${note.position}" class="text-button"`) : `<span class="muted">${t("sourceUnavailable")}</span>`}${button("note-edit", t("editNote"), undefined, `data-id="${esc(note.id)}" class="secondary"`)}${button("note-export", t("exportNote"), undefined, `data-id="${esc(note.id)}" class="secondary"`)}</div></article>`).join("")}</section>`;
+    return `<section class="analysis-groups" aria-label="${t("notes")}"><h2>${t("notes")}</h2>${notes.map((note) => `<article class="analysis-group note"><h3>${esc(note.title)}</h3><p>${esc(note.body)}</p><div>${note.source_available ? button("origin", t("openMessage"), "arrow", `data-id="${esc(note.session_id)}" data-position="${note.position}" class="text-button"`) : `<span class="muted">${t("sourceUnavailable")}</span>`}${button("note-edit", t("editNote"), undefined, `data-id="${esc(note.id)}" class="secondary" ${disabled()}`)}${button("note-export", t("exportNote"), undefined, `data-id="${esc(note.id)}" class="secondary"`)}</div></article>`).join("")}</section>`;
   }
   function noteDialog(): string {
     if (!noteDraft) return "";
     return `<dialog id="note-dialog" class="note-dialog" aria-labelledby="note-heading"><form id="note-form"><h2 id="note-heading">${t(noteDraft.id ? "editNote" : "addNote")}</h2><label>${t("title")}<input name="title" maxlength="200" required autofocus value="${esc(noteDraft.title)}"></label><label>${t("noteBody")}<textarea name="body" rows="6" maxlength="50000" required>${esc(noteDraft.body)}</textarea></label><p role="alert" class="muted"></p><div class="dialog-actions">${button("cancel-note", t("cancel"), undefined, 'class="secondary"')}<button class="primary" type="submit">${t("save")}</button></div></form></dialog>`;
   }
+  const indexStatus =
+    indexProgress.phase === "scan"
+      ? t("scanningHistory")
+      : indexProgress.phase === "index"
+        ? `${t("indexingHistory")} · ${indexProgress.completed.toLocaleString(language)}${indexProgress.total ? ` / ${indexProgress.total.toLocaleString(language)}` : ""}${indexProgress.available ? ` · ${indexProgress.available.toLocaleString(language)} ${t("sessionsAvailable")}` : ""}`
+        : "";
   const descriptions = {
     sessions: "sessionsDescription",
     memories: "memoriesDescription",
@@ -386,6 +399,6 @@ export function workspaceMarkup(state: ViewState): string {
   const layout =
     view === "activity"
       ? activityMarkup()
-      : `${toolbar()}${selected.size ? `<div class="bulk-bar"><strong>${selected.size} ${t("selected")}</strong>${button("clear-selection", t("clearSelection"), undefined, 'class="text-button"')}${button("trash", t("moveTrash"), "trash", `class="danger-button" ${test("trash-selected")} ${disabled()}`)}</div>` : ""}<div class="work-area ${view === "trash" ? "trash-area" : ""}">${list(items)}${view !== "trash" ? detail() : ""}</div>${view === "memories" ? notesMarkup() : ""}`;
-  return `${sidebar()}<main class="workspace ${mobileDetail ? "mobile-detail" : ""} ${view === "memories" && catalog.notes?.length ? "has-notes" : ""}"><header class="page-header"><div><h1>${t(view)}</h1><p>${t(descriptions[view])}</p></div><div class="header-actions">${catalog.mode === "local" ? button("refresh", t("refresh"), "refresh", `class="secondary" ${test("refresh")} ${busy ? "disabled" : ""}`) : ""}<span class="private-label">${icon("shield")}${t("privacy")}</span></div></header><div class="summary-strip"><span><strong>${counts[view]}</strong> ${t(view === "sessions" || view === "activity" ? "conversations" : view === "memories" ? "memoryCount" : "trashCount")}</span>${view === "sessions" ? `<span><strong>${projectOptions.length}</strong> ${t("projects")}</span><span class="summary-providers">Claude Code <span>·</span> Codex <span>·</span> Antigravity</span>` : ""}<span class="snapshot-date">${t("generated")} ${date(catalog.generated_at)}</span></div>${catalog.mode === "demo" ? `<div class="demo-banner"><span>${icon("terminal")}${t("demoBanner")}</span>${button("reset", t("resetDemo"), "refresh", `class="text-button" ${test("reset-demo")}`)}</div>` : catalog.mode === "static" ? `<div class="static-banner">${icon("shield")}${t("readOnly")}</div>` : ""}${error ? `<div class="notice error" role="alert"><span>${esc(error)}</span>${button("dismiss-error", t("dismiss"), "close", 'class="icon-button"')}</div>` : ""}${notice ? `<div class="notice success" role="status"><span>${esc(notice)}</span>${button("dismiss-notice", t("dismiss"), "close", 'class="icon-button"')}</div>` : ""}${catalog.warnings.length ? `<details class="warnings"><summary>${t("warnings")} (${catalog.warnings.length})</summary>${catalog.warnings.map((warning) => `<p>${esc(warning.message)}${warning.path ? `<code>${esc(warning.path)}</code>` : ""}</p>`).join("")}</details>` : ""}${layout}</main>${noteDialog()}<dialog id="trash-dialog" aria-labelledby="dialog-title"><form method="dialog"><div class="dialog-icon">${icon("trash")}</div><h2 id="dialog-title">${t("confirmTitle")}</h2><p>${selected.size} ${t("selected")}. ${t("confirmDescription")}</p><div class="dialog-actions"><button class="secondary" value="cancel" autofocus>${t("cancel")}</button><button type="button" data-action="confirm-trash" class="danger-button" ${test("confirm-trash")}>${t("confirmTrash")}</button></div></form></dialog>`;
+      : `${toolbar()}${selected.size ? `<div class="bulk-bar"><strong>${selected.size} ${t("selected")}</strong>${button("clear-selection", t("clearSelection"), undefined, 'class="text-button"')}${button("trash", t("moveTrash"), "trash", `class="danger-button" ${test("trash-selected")} ${filesDisabled()}`)}</div>` : ""}<div class="work-area ${view === "trash" ? "trash-area" : ""}">${list(items)}${view !== "trash" ? detail() : ""}</div>${view === "memories" ? notesMarkup() : ""}`;
+  return `${sidebar()}<main class="workspace ${mobileDetail ? "mobile-detail" : ""} ${view === "memories" && catalog.notes?.length ? "has-notes" : ""}"><header class="page-header"><div><h1>${t(view)}</h1><p>${t(descriptions[view])}</p></div><div class="header-actions">${catalog.mode === "local" ? button("refresh", t("refresh"), "refresh", `class="secondary" ${test("refresh")} ${busy || indexStatus ? "disabled" : ""}`) : ""}<span class="private-label">${icon("shield")}${t("privacy")}</span></div></header><div class="summary-strip"><span><strong>${counts[view]}</strong> ${t(view === "sessions" || view === "activity" ? "conversations" : view === "memories" ? "memoryCount" : "trashCount")}</span>${view === "sessions" ? `<span><strong>${projectOptions.length}</strong> ${t("projects")}</span><span class="summary-providers">Claude Code <span>·</span> Codex <span>·</span> Antigravity</span>` : ""}<span class="snapshot-date">${t("generated")} ${date(catalog.generated_at)}</span></div>${catalog.mode === "demo" ? `<div class="demo-banner"><span>${icon("terminal")}${t("demoBanner")}</span>${button("reset", t("resetDemo"), "refresh", `class="text-button" ${test("reset-demo")}`)}</div>` : catalog.mode === "static" ? `<div class="static-banner">${icon("shield")}${t("readOnly")}</div>` : ""}${error ? `<div class="notice error" role="alert"><span>${esc(error)}</span>${button("dismiss-error", t("dismiss"), "close", 'class="icon-button"')}</div>` : ""}${notice ? `<div class="notice success" role="status"><span>${esc(notice)}</span>${button("dismiss-notice", t("dismiss"), "close", 'class="icon-button"')}</div>` : ""}${indexProgress.phase === "error" ? `<p class="notice error" role="alert">${t("indexFailed")}</p>` : ""}${indexStatus ? `<p class="notice" role="status" data-testid="index-progress">${esc(indexStatus)}</p>` : ""}${catalog.warnings.length ? `<details class="warnings"><summary>${t("warnings")} (${catalog.warnings.length})</summary>${catalog.warnings.map((warning) => `<p>${esc(warning.message)}${warning.path ? `<code>${esc(warning.path)}</code>` : ""}</p>`).join("")}</details>` : ""}${layout}</main>${noteDialog()}<dialog id="trash-dialog" aria-labelledby="dialog-title"><form method="dialog"><div class="dialog-icon">${icon("trash")}</div><h2 id="dialog-title">${t("confirmTitle")}</h2><p>${selected.size} ${t("selected")}. ${t("confirmDescription")}</p><div class="dialog-actions"><button class="secondary" value="cancel" autofocus>${t("cancel")}</button><button type="button" data-action="confirm-trash" class="danger-button" ${test("confirm-trash")}>${t("confirmTrash")}</button></div></form></dialog>`;
 }

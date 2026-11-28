@@ -5,6 +5,7 @@ import type {
   ConversationPage,
   ConversationState,
   Filters,
+  IndexProgress,
   Language,
   Memory,
   Note,
@@ -19,6 +20,7 @@ import {
   filterSessions,
   isInteractive,
   persist,
+  projectContains,
   readPreference,
   readReview,
   stale,
@@ -97,6 +99,9 @@ let copied = false;
 let sessionPage: SessionPage | undefined;
 let pageOffset = 0;
 let listPending = !!catalog.paged;
+let indexProgress: IndexProgress = { phase: "idle" };
+let indexMonitor = 0;
+let openInitialSession = true;
 let listRequest = 0;
 let searchTimer: number | undefined;
 let activeSession: Session | undefined;
@@ -135,7 +140,8 @@ function visibleItems(): (Session | Memory | TrashEntry)[] {
     .filter(
       (item) =>
         (filters.provider === "all" || item.provider === filters.provider) &&
-        (!filters.project || item.project_path === filters.project) &&
+        (!filters.project ||
+          projectContains(filters.project, item.project_path)) &&
         (age === "all" || (age === "stale") === isStale(item)) &&
         `${item.name} ${item.description} ${item.body} ${item.project_path}`
           .toLocaleLowerCase()
@@ -200,6 +206,7 @@ function render(): void {
     sessionPage,
     pageOffset,
     listPending,
+    indexProgress,
     activity,
     activityDays,
     noteDraft,
@@ -524,9 +531,10 @@ async function api(path: string, body?: unknown): Promise<unknown> {
 }
 async function refresh(cached = false): Promise<void> {
   const previous = activeSession?.id;
-  const value = (await api(
-    cached ? "/api/catalog?cached=1" : "/api/catalog",
-  )) as Bootstrap;
+  const wasMobileDetail = mobileDetail;
+  const previousTab = detailTab;
+  const previousMessage = targetMessage;
+  const value = await refreshCatalog(cached);
   if (
     !Array.isArray(value.sessions) ||
     !Array.isArray(value.memories) ||
@@ -539,9 +547,85 @@ async function refresh(cached = false): Promise<void> {
   if (view === "sessions") {
     await fetchSessions();
     const session = sessionPage?.sessions.find((row) => row.id === previous);
-    if (session) openItem(session.id);
+    if (session) {
+      openItem(session.id, previousMessage);
+      mobileDetail = wasMobileDetail;
+      detailTab = previousTab;
+      render();
+    }
+    openFirstSession();
   } else if (view === "activity") {
     await refreshActivity();
+  }
+  if (catalog.background_index) void monitorBackgroundIndex();
+}
+function openFirstSession(): void {
+  const first = catalog.sessions[0];
+  if (!openInitialSession || !first || view !== "sessions") return;
+  openInitialSession = false;
+  if (!detailId && !filters.query) {
+    openItem(first.id);
+    mobileDetail = false;
+    render();
+  }
+}
+async function monitorBackgroundIndex(): Promise<void> {
+  const monitor = ++indexMonitor;
+  const poll = async (): Promise<void> => {
+    try {
+      const state = (await api("/api/progress")) as IndexProgress;
+      if (monitor !== indexMonitor) return;
+      indexProgress = state;
+      if ((state.revision ?? 0) > (catalog.index_revision ?? 0)) {
+        await refresh(true);
+        return;
+      }
+      if (state.phase === "idle") {
+        const migrated = await migrateLegacyReviews();
+        if (monitor !== indexMonitor) return;
+        if (migrated) {
+          await refresh(true);
+          return;
+        }
+      }
+      if (state.phase === "scan" || state.phase === "index") {
+        window.setTimeout(() => {
+          if (monitor === indexMonitor) void poll();
+        }, 1500);
+      }
+      render();
+    } catch (failure) {
+      if (monitor !== indexMonitor) return;
+      indexProgress = { phase: "idle" };
+      showError(failure);
+    }
+  };
+  await poll();
+}
+async function refreshCatalog(cached: boolean): Promise<Bootstrap> {
+  const path = cached ? "/api/catalog?cached=1" : "/api/catalog";
+  if (catalog.background_index) return (await api(path)) as Bootstrap;
+  let active = true;
+  let timer: number;
+  const poll = async (): Promise<void> => {
+    try {
+      const progress = (await api("/api/progress")) as IndexProgress;
+      if (active && progress.phase !== "idle") {
+        indexProgress = progress;
+        render();
+      }
+    } catch {
+      // The catalog request reports its own errors.
+    }
+    if (active) timer = window.setTimeout(() => void poll(), 2000);
+  };
+  timer = window.setTimeout(() => void poll(), 700);
+  try {
+    return (await api(path)) as Bootstrap;
+  } finally {
+    active = false;
+    window.clearTimeout(timer);
+    indexProgress = { phase: "idle" };
   }
 }
 async function mutate(kind: "trash" | "restore", ids: string[]): Promise<void> {
@@ -811,7 +895,7 @@ root.addEventListener("click", async (event) => {
     render();
     try {
       await refresh();
-      notice = t("refreshDone");
+      if (!catalog.background_index) notice = t("refreshDone");
       error = "";
     } catch (failure) {
       error = failure instanceof Error ? failure.message : t("requestFailed");
@@ -884,6 +968,23 @@ root.addEventListener(
   },
   true,
 );
+async function migrateLegacyReviews(): Promise<boolean> {
+  const legacy = Object.entries(readReview(safeStorage)).filter(([id]) =>
+    /^[a-z]+:[0-9a-f]{64}$/.test(id),
+  );
+  const migrationKey = `session-desk:review-migrated:v1:${catalog.workspace_id}`;
+  if (!legacy.length || safeStorage.getItem(migrationKey)) return false;
+  try {
+    for (let offset = 0; offset < legacy.length; offset += 1000) {
+      const batch = Object.fromEntries(legacy.slice(offset, offset + 1000));
+      await api("/api/reviews", { reviews: batch, migrate: true });
+    }
+    localStorage.setItem(migrationKey, "true");
+    return true;
+  } catch {
+    return false;
+  }
+}
 async function initialize(): Promise<void> {
   render();
   if (!catalog.paged) {
@@ -894,26 +995,8 @@ async function initialize(): Promise<void> {
     return;
   }
   try {
-    const legacy = Object.entries(reviews).filter(([id]) =>
-      /^[a-z]+:[0-9a-f]{64}$/.test(id),
-    );
-    const migrationKey = `session-desk:review-migrated:v1:${catalog.workspace_id}`;
-    if (legacy.length && !safeStorage.getItem(migrationKey)) {
-      for (let offset = 0; offset < legacy.length; offset += 1000) {
-        const batch = Object.fromEntries(legacy.slice(offset, offset + 1000));
-        await api("/api/reviews", { reviews: batch, migrate: true });
-      }
-      try {
-        localStorage.setItem(migrationKey, "true");
-      } catch {}
-    }
-    await refresh();
-    const first = catalog.sessions[0];
-    if (first && !detailId && view === "sessions" && !filters.query) {
-      openItem(first.id);
-      mobileDetail = false;
-      render();
-    }
+    await migrateLegacyReviews();
+    await refresh(true);
   } catch (failure) {
     listPending = false;
     showError(failure);

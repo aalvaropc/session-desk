@@ -7,18 +7,36 @@ import os
 import sqlite3
 import time
 import uuid
+from contextlib import nullcontext
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, ContextManager
 
-from ..models import ScanWarning, Session
+from ..models import Message, Session
 from ..sessions import SessionStore
 
 PAGE_SIZE = 50
 MESSAGE_PAGE_SIZE = 40
+IMPORT_BATCH_SIZE = 25
+IMPORT_BATCH_SECONDS = 1.0
 
 
 def normalized(text: str) -> str:
     return " ".join(text.casefold().split())
+
+
+def project_contains(project: str, path: str) -> bool:
+    if not path:
+        return False
+    root = os.path.normcase(os.path.normpath(project))
+    candidate = os.path.normcase(os.path.normpath(path))
+    if root == candidate:
+        return True
+    if not os.path.isabs(root) and (root == "." or os.sep not in root):
+        return False
+    try:
+        return os.path.commonpath((root, candidate)) == root
+    except ValueError:
+        return False
 
 
 def workspace_key(store: SessionStore) -> str:
@@ -50,9 +68,10 @@ class Workspace:
             os.close(os.open(path, os.O_CREAT | os.O_RDWR, 0o600))
         self.db = sqlite3.connect(path if path is not None else ":memory:", check_same_thread=False)
         self.db.row_factory = sqlite3.Row
+        if path is not None:
+            self.db.execute("PRAGMA journal_mode = WAL").fetchone()
         self.rows: dict[str, Session] = {}
         self.library: dict[str, Any] | None = None
-        self.warnings: list[ScanWarning] = []
         self.db.executescript("""
             PRAGMA foreign_keys = ON;
             PRAGMA secure_delete = ON;
@@ -78,6 +97,7 @@ class Workspace:
                 session_id TEXT PRIMARY KEY,
                 state TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS pending_initial_import (id INTEGER PRIMARY KEY);
             CREATE TABLE IF NOT EXISTS note (
                 id TEXT PRIMARY KEY,
                 session_id TEXT NOT NULL,
@@ -118,6 +138,17 @@ class Workspace:
                 DROP TABLE IF EXISTS workspace_fts_ready;
             """)
 
+        self.rows = self.snapshots(
+            {row["id"]: row for row in self.db.execute("SELECT * FROM indexed_session")}
+        )
+
+    @staticmethod
+    def snapshots(records: dict[str, sqlite3.Row]) -> dict[str, Session]:
+        return {
+            identifier: Session(**json.loads(record["snapshot"]))
+            for identifier, record in records.items()
+        }
+
     def __enter__(self) -> Workspace:
         return self
 
@@ -127,23 +158,80 @@ class Workspace:
     def close(self) -> None:
         self.db.close()
 
-    def refresh(self, *, rebuild: bool = False, grep: str | None = None) -> None:
-        rows = {row.id: row for row in self.store.scan(grep=grep, previews=False)}
-        unstable = {
-            warning.path for warning in self.store.warnings if warning.code == "changed_during_scan"
-        }
-        self.warnings = []
+    def needs_initial_import(self) -> bool:
+        return (
+            not self.rows
+            or self.db.execute("SELECT 1 FROM pending_initial_import LIMIT 1").fetchone()
+            is not None
+        )
+
+    def refresh(
+        self,
+        *,
+        rebuild: bool = False,
+        grep: str | None = None,
+        progress: Callable[[int, int], None] | None = None,
+        checkpoint: Callable[[], None] | None = None,
+        publish: Callable[[Workspace, list[Session]], ContextManager[None]] | None = None,
+        publish_partial: Callable[[Workspace], ContextManager[None]] | None = None,
+    ) -> None:
+        known = {item["id"]: item for item in self.db.execute("SELECT * FROM indexed_session")}
+        snapshots = self.snapshots(known)
+        processed = 0
+        published = dict(snapshots)
+        pending = 0
+        last_publish = time.monotonic()
+        progressive = publish_partial if self.needs_initial_import() else None
+
+        def consume(row: Session, messages: list[Message], latest: float) -> None:
+            nonlocal processed, pending, last_publish
+            if checkpoint is not None:
+                checkpoint()
+            self.write_session(row, messages, latest)
+            processed += 1
+            if progressive is not None:
+                published[row.id] = row
+                pending += 1
+                if (
+                    processed == 1
+                    or pending >= IMPORT_BATCH_SIZE
+                    or time.monotonic() - last_publish >= IMPORT_BATCH_SECONDS
+                ):
+                    with progressive(self):
+                        self.db.commit()
+                        self.rows = dict(published)
+                    pending = 0
+                    last_publish = time.monotonic()
+            if progress is not None:
+                progress(processed, 0)
+
         with self.db:
-            known = {item["id"]: item for item in self.db.execute("SELECT * FROM indexed_session")}
-            retained = {}
-            for identifier in known.keys() - rows.keys():
-                previous = Session(**json.loads(known[identifier]["snapshot"]))
+            if progressive is not None:
+                self.db.execute("INSERT OR IGNORE INTO pending_initial_import VALUES (1)")
+            rows = {
+                row.id: row
+                for row in self.store.scan(
+                    grep=grep,
+                    previews=False,
+                    known={} if rebuild else snapshots,
+                    consume=consume,
+                    checkpoint=checkpoint,
+                    recent_first=progressive is not None,
+                )
+            }
+            unstable = {
+                warning.path
+                for warning in self.store.warnings
+                if warning.code == "changed_during_scan"
+            }
+            for identifier in snapshots.keys() - rows.keys():
+                previous = snapshots[identifier]
                 if previous.file_path in unstable and Path(previous.file_path).is_file():
                     if not grep:
-                        retained[identifier] = previous
+                        rows[identifier] = previous
                 else:
                     self.db.execute("DELETE FROM indexed_session WHERE id = ?", (identifier,))
-            for identifier, row in list(rows.items()):
+            for identifier, row in rows.items():
                 previous_record = known.get(identifier)
                 if (
                     not rebuild
@@ -151,65 +239,49 @@ class Workspace:
                     and previous_record["version"] == row.version
                 ):
                     self.apply_metadata(row, previous_record)
-                    continue
-                try:
-                    messages, latest = self.store.conversation(identifier)
-                except (OSError, ValueError):
-                    if previous_record is not None and Path(row.file_path).is_file():
-                        previous = Session(**json.loads(previous_record["snapshot"]))
-                        if not grep:
-                            retained[identifier] = previous
-                    else:
-                        self.db.execute("DELETE FROM indexed_session WHERE id = ?", (identifier,))
-                    self.warnings.append(
-                        ScanWarning(
-                            "index_read",
-                            "Could not refresh conversation; retry refresh.",
-                            row.file_path,
+                    # Reuse the saved messages while keeping provider metadata changes durable.
+                    if row != snapshots[identifier]:
+                        self.db.execute(
+                            "UPDATE indexed_session SET snapshot = ? WHERE id = ?",
+                            (json.dumps(row.to_dict(), ensure_ascii=False), identifier),
                         )
-                    )
-                    del rows[identifier]
-                    continue
-                self.db.execute("DELETE FROM indexed_session WHERE id = ?", (identifier,))
-                stats = {
-                    "first_message": next(
-                        (
-                            message["text"][:300]
-                            for message in messages
-                            if message["role"] == "user"
-                        ),
-                        "",
-                    ),
-                    "latest": latest,
-                    "count": len(messages),
-                    "prompts": sum(message["role"] == "user" for message in messages),
-                }
-                self.apply_metadata(row, stats)
-                self.db.execute(
-                    """INSERT INTO indexed_session VALUES (:id, :version, :first_message,
-                       :latest, :count, :prompts, :snapshot)""",
-                    {
-                        "id": identifier,
-                        "version": row.version,
-                        **stats,
-                        "snapshot": json.dumps(row.to_dict(), ensure_ascii=False),
-                    },
-                )
-                self.db.executemany(
-                    "INSERT INTO message(session_id, position, role, text, search_text) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    [
-                        (
-                            identifier,
-                            position,
-                            message["role"],
-                            message["text"],
-                            normalized(message["text"]),
-                        )
-                        for position, message in enumerate(messages)
-                    ],
-                )
-        self.rows = {**rows, **retained}
+            if progress is not None:
+                progress(len(rows), len(rows))
+            if checkpoint is not None:
+                checkpoint()
+            self.db.execute("DELETE FROM pending_initial_import")
+            with publish(self, list(rows.values())) if publish is not None else nullcontext():
+                self.db.commit()
+                self.rows = rows
+
+    def write_session(self, row: Session, messages: list[Message], latest: float) -> None:
+        stats = {
+            "first_message": next(
+                (message["text"][:300] for message in messages if message["role"] == "user"), ""
+            ),
+            "latest": latest,
+            "count": len(messages),
+            "prompts": sum(message["role"] == "user" for message in messages),
+        }
+        self.apply_metadata(row, stats)
+        self.db.execute("DELETE FROM indexed_session WHERE id = ?", (row.id,))
+        self.db.execute(
+            """INSERT INTO indexed_session VALUES (:id, :version, :first_message,
+               :latest, :count, :prompts, :snapshot)""",
+            {
+                "id": row.id,
+                "version": row.version,
+                **stats,
+                "snapshot": json.dumps(row.to_dict(), ensure_ascii=False),
+            },
+        )
+        self.db.executemany(
+            "INSERT INTO message(session_id, position, role, text, search_text) VALUES (?, ?, ?, ?, ?)",
+            (
+                (row.id, position, message["role"], message["text"], normalized(message["text"]))
+                for position, message in enumerate(messages)
+            ),
+        )
 
     @staticmethod
     def apply_metadata(row: Session, stats: Any) -> None:
@@ -256,7 +328,7 @@ class Workspace:
             row
             for row in available
             if (provider == "all" or row.provider == provider)
-            and (not project or row.project_path == project)
+            and (not project or project_contains(project, row.project_path))
             and (review == "all" or reviews.get(row.id, "pending") == review)
         ]
         hits = self.hits(needle) if needle and rows else {}
@@ -335,6 +407,15 @@ class Workspace:
                 matches,
             )
         }
+
+    def full_messages(self, identifier: str) -> list[Message]:
+        return [
+            {"role": row["role"], "text": row["text"]}
+            for row in self.db.execute(
+                "SELECT role, text FROM message WHERE session_id = ? ORDER BY position",
+                (identifier,),
+            )
+        ]
 
     def message_page(self, identifier: str, offset: int) -> dict[str, Any] | None:
         if not self.db.execute(

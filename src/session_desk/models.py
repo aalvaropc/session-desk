@@ -42,6 +42,7 @@ class Session(Serializable):
     variant: Optional[str] = None
     has_transcript: bool = True
     activity_source: str = "file"
+    source_branch: Optional[str] = None
 
 
 @dataclass

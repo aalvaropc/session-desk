@@ -38,6 +38,10 @@ From a source checkout, use `uv run session-desk start --open`. To explore witho
 | Antigravity App | `~/.gemini/antigravity` | Conversation search in the App | — |
 | Antigravity IDE | `~/.gemini/antigravity-ide` | History in the agent side panel | — |
 
+The project filter includes sessions in subfolders and in worktrees stored under the
+selected project. Claude subagent transcripts are auxiliary records and are grouped
+with their provider session history on disk.
+
 Antigravity reads the available JSONL and the summary database. Conversations whose text
 is stored only in an opaque native file appear as metadata. Session Desk opens
 Antigravity source files for reading. Use `--antigravity-home` to replace the shared
@@ -46,7 +50,11 @@ parent directory.
 ## Local storage
 
 The live workspace keeps a searchable copy of readable messages under Session Desk's
-private local state directory. Refresh incorporates changes from the providers.
+private local state directory. The saved catalog is available while Session Desk checks
+for changed transcripts in the background. Refresh starts another check, and the panel
+shows how many sessions are searchable during the update. On a fresh workspace,
+recent sessions become searchable in batches. A restart picks up from the last saved
+batch. Searches and reading stay available during later refreshes. Reviews, notes and trash changes resume after the update completes.
 Run `session-desk stop` and then `session-desk reindex` to rebuild the searchable copy.
 Pass the same custom provider roots when applicable. Reindex retains saved reviews and
 notes. HTML exports can contain private text and include conversation previews.

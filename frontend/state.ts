@@ -42,6 +42,17 @@ export function persist(key: string, value: unknown): void {
     return;
   }
 }
+export function projectContains(project: string, path: string): boolean {
+  const root = project.replace(/\\/g, "/").replace(/\/+$/, "") || "/";
+  const child = path.replace(/\\/g, "/").replace(/\/+$/, "") || "/";
+  if (!project || !path) return false;
+  if (root === child) return true;
+  if (root.startsWith("/") || root.startsWith("~/"))
+    return child.startsWith(root === "/" ? "/" : root + "/");
+  if (/^[a-z]:/i.test(root))
+    return child.toLowerCase().startsWith(root.toLowerCase() + "/");
+  return false;
+}
 export function filterSessions(
   sessions: Session[],
   filters: Filters,
@@ -52,7 +63,8 @@ export function filterSessions(
     .filter(
       (session) =>
         (filters.provider === "all" || session.provider === filters.provider) &&
-        (!filters.project || session.project_path === filters.project) &&
+        (!filters.project ||
+          projectContains(filters.project, session.project_path)) &&
         (filters.review === "all" ||
           (reviews[session.id] ?? "pending") === filters.review) &&
         (!query ||

@@ -7,12 +7,14 @@ import re
 import secrets
 import sqlite3
 import threading
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from socketserver import TCPServer
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 from urllib.parse import parse_qs, unquote
 
+from .models import Session
 from .rendering import build_catalog, read_asset, render_page
 from .services.workspace import Workspace, workspace_key
 from .sessions import SessionStore
@@ -20,6 +22,10 @@ from .sessions import SessionStore
 PROVIDERS = {"all", "claude", "codex", "antigravity"}
 
 SESSION_ID = re.compile(r"[a-z]+:[0-9a-f]{64}")
+
+
+class IndexCancelled(RuntimeError):
+    pass
 
 
 class PanelServer(ThreadingHTTPServer):
@@ -40,6 +46,12 @@ class PanelServer(ThreadingHTTPServer):
     ) -> None:
         self.store_lock = threading.RLock()
         self.workspace: Optional[Workspace] = None
+        self.index_progress: dict[str, str | int] = {"phase": "idle"}
+        self.index_thread: threading.Thread | None = None
+        self.index_cancelled = threading.Event()
+        self.index_revision = 0
+        self.index_ready = False
+        self.background_index = index_path if not search and not demo else None
         super().__init__(("127.0.0.1", port), PanelHandler)
         self.store = store
         self.project = project
@@ -56,7 +68,10 @@ class PanelServer(ThreadingHTTPServer):
             raise
 
     def server_close(self) -> None:
+        self.index_cancelled.set()
         super().server_close()
+        if self.index_thread is not None:
+            self.index_thread.join()
         with self.store_lock:
             if self.workspace is not None:
                 self.workspace.close()
@@ -74,16 +89,31 @@ class PanelServer(ThreadingHTTPServer):
             "token": self.token,
             "paged": True,
             "workspace_id": workspace_key(self.store),
+            "background_index": self.background_index is not None,
         }
 
     def refresh_workspace(self) -> dict[str, Any]:
         workspace = self.workspace
         if workspace is None:
             return self.catalog()
-        workspace.refresh(grep=self.search)
+        self.index_progress = {"phase": "scan", "revision": self.index_revision}
+        try:
+            workspace.refresh(grep=self.search, progress=self.report_index_progress)
+        finally:
+            self.index_progress = {"phase": "idle", "revision": self.index_revision}
+        library = self.build_library(self.store, list(workspace.rows.values()))
+        workspace.library = library
+        return library
+
+    def build_library(self, store: SessionStore, rows: list[Session]) -> dict[str, Any]:
         library = self.bootstrap()
-        memories = self.store.memories()
-        visible = workspace.scoped_rows(self.project or "", bool(self.search))
+        memories = store.memories()
+        visible = [
+            row
+            for row in rows
+            if (not self.project or self.project.casefold() in row.project_path.casefold())
+            and (not self.search or row.match)
+        ]
         origin: dict[tuple[str, str, str], str] = {}
         for row in visible:
             origin.setdefault((row.provider, row.project_path, row.session_id), row.id)
@@ -102,19 +132,97 @@ class PanelServer(ThreadingHTTPServer):
                 in (f"{memory.name} {memory.description} {memory.body}".casefold())
             )
         ]
-        library["trash"] = [entry.to_dict() for entry in self.store.list_trash()]
-        library["warnings"] = [
-            warning.to_dict() for warning in [*self.store.warnings, *workspace.warnings]
-        ]
-        workspace.library = library
+        library["trash"] = [entry.to_dict() for entry in store.list_trash()]
+        library["warnings"] = [warning.to_dict() for warning in store.warnings]
         return library
+
+    def report_index_progress(self, completed: int, total: int) -> None:
+        workspace = self.workspace
+        self.index_progress = {
+            "phase": "index",
+            "completed": completed,
+            "total": total,
+            "revision": self.index_revision,
+            "available": len(workspace.rows) if workspace is not None else 0,
+        }
+
+    def check_index_cancelled(self) -> None:
+        if self.index_cancelled.is_set():
+            raise IndexCancelled
+
+    def queue_index(self) -> None:
+        if self.background_index is None or self.index_cancelled.is_set():
+            return
+        if self.index_thread is not None and self.index_thread.is_alive():
+            return
+        self.index_progress = {"phase": "scan", "revision": self.index_revision}
+        self.index_thread = threading.Thread(target=self.index_in_background, daemon=True)
+        self.index_thread.start()
+
+    def index_in_background(self) -> None:
+        roots = self.store.roots
+        store = SessionStore(roots["claude"], roots["codex"], roots["antigravity"])
+        try:
+            with Workspace(store, self.background_index) as candidate:
+                candidate.db.set_progress_handler(self.index_cancelled.is_set, 10000)
+                candidate.refresh(
+                    progress=self.report_index_progress,
+                    checkpoint=self.check_index_cancelled,
+                    publish=self.publish_index,
+                    publish_partial=self.publish_partial_index,
+                )
+        except IndexCancelled:
+            return
+        except Exception:
+            with self.store_lock:
+                if not self.index_cancelled.is_set():
+                    self.index_progress = {"phase": "error", "revision": self.index_revision}
+
+    @contextmanager
+    def publish_partial_index(self, candidate: Workspace) -> Iterator[None]:
+        with self.store_lock:
+            self.check_index_cancelled()
+            workspace = self.workspace
+            if workspace is None:
+                raise IndexCancelled
+            yield
+            workspace.rows = candidate.rows
+            self.index_revision += 1
+
+    @contextmanager
+    def publish_index(self, candidate: Workspace, rows: list[Session]) -> Iterator[None]:
+        library = self.build_library(candidate.store, rows)
+        with self.store_lock:
+            self.check_index_cancelled()
+            workspace = self.workspace
+            if workspace is None:
+                raise IndexCancelled
+            yield
+            self.store = candidate.store
+            workspace.store = candidate.store
+            workspace.rows = candidate.rows
+            workspace.library = library
+            self.index_revision += 1
+            self.index_ready = True
+            self.index_progress = {"phase": "idle", "revision": self.index_revision}
+
+    def index_is_running(self) -> bool:
+        return self.background_index is not None and self.index_progress["phase"] in (
+            "scan",
+            "index",
+        )
 
     def ready_workspace(self) -> Workspace:
         workspace = self.workspace
         if workspace is None:
             raise ValueError("This feature requires a local workspace")
         if workspace.library is None:
-            self.refresh_workspace()
+            if self.background_index is None:
+                self.refresh_workspace()
+            else:
+                self.store.registry.update(workspace.rows)
+                workspace.library = self.build_library(self.store, list(workspace.rows.values()))
+                self.queue_index()
         return workspace
 
     def visible_session(self, identifier: str) -> bool:
@@ -183,6 +291,12 @@ class PanelHandler(BaseHTTPRequestHandler):
         if not self.allowed(token=self.path.startswith("/api/")):
             self.reply(403, {"error": "Local access is not authorized", "code": "unauthorized"})
             return
+        if self.path == "/" and self.server.mode == "local":
+            self.reply(200, render_page(self.server.bootstrap()), "text/html; charset=utf-8")
+            return
+        if self.path == "/api/progress":
+            self.reply(200, self.server.index_progress)
+            return
         if self.path == "/api/status":
             self.reply(
                 200,
@@ -214,25 +328,31 @@ class PanelHandler(BaseHTTPRequestHandler):
         path, _, query = self.path.partition("?")
         params = parse_qs(query, max_num_fields=12, keep_blank_values=True)
         if path == "/" and not query:
-            catalog = (
-                self.server.bootstrap()
-                if self.server.workspace is not None
-                else self.server.catalog()
-            )
-            self.reply(200, render_page(catalog), "text/html; charset=utf-8")
+            self.reply(200, render_page(self.server.catalog()), "text/html; charset=utf-8")
         elif path == "/api/catalog":
             workspace = self.server.workspace
-            library = (
-                workspace.library
-                if workspace is not None
+            if workspace is not None and self.server.background_index is not None:
+                library = self.server.ready_workspace().library
+                if params.get("cached") != ["1"]:
+                    self.server.queue_index()
+            elif (
+                workspace is not None
                 and workspace.library is not None
                 and params.get("cached") == ["1"]
-                else self.server.refresh_workspace()
-            )
+            ):
+                library = workspace.library
+            else:
+                library = self.server.refresh_workspace()
+            assert library is not None
             if self.server.workspace is not None:
                 notes = self.server.workspace.notes()
                 self.scope_note_links(notes)
-                library = {**library, "notes": notes}
+                library = {
+                    **library,
+                    "notes": notes,
+                    "index_revision": self.server.index_revision,
+                    "index_ready": self.server.index_ready,
+                }
             self.reply(200, library)
         elif path == "/api/trash":
             self.reply(200, [entry.to_dict() for entry in self.server.store.list_trash()])
@@ -272,6 +392,12 @@ class PanelHandler(BaseHTTPRequestHandler):
 
     def get_full_messages(self, identifier: str) -> None:
         try:
+            if self.server.background_index is not None:
+                if not self.server.visible_session(identifier):
+                    raise KeyError(identifier)
+                workspace = self.server.ready_workspace()
+                self.reply(200, {"messages": workspace.full_messages(identifier)})
+                return
             if (
                 (self.server.project or self.server.search)
                 and self.server.workspace is not None
@@ -364,6 +490,8 @@ class PanelHandler(BaseHTTPRequestHandler):
                     if self.server.stopping:
                         self.reply(503, {"error": "Workspace is shutting down"})
                         return
+                    if self.reject_during_index():
+                        return
                     self.save_workspace_data(payload)
                 return
             identifiers = payload.get("ids") if isinstance(payload, dict) else None
@@ -378,6 +506,17 @@ class PanelHandler(BaseHTTPRequestHandler):
             with self.server.store_lock:
                 if self.server.stopping:
                     self.reply(503, {"error": "Workspace is shutting down"})
+                    return
+                if self.reject_during_index():
+                    return
+                if self.server.background_index is not None and not self.server.index_ready:
+                    self.reply(
+                        409,
+                        {
+                            "error": "Refresh the workspace successfully before moving history files.",
+                            "code": "index_not_ready",
+                        },
+                    )
                     return
                 if self.path == "/api/trash":
                     versions = payload.get("versions")
@@ -412,6 +551,18 @@ class PanelHandler(BaseHTTPRequestHandler):
         except (ValueError, TypeError, UnicodeError) as error:
             self.reply(400, {"error": str(error), "code": "invalid_request"})
 
+    def reject_during_index(self) -> bool:
+        if not self.server.index_is_running():
+            return False
+        self.reply(
+            409,
+            {
+                "error": "Wait for the history update to finish before editing the workspace.",
+                "code": "index_in_progress",
+            },
+        )
+        return True
+
     def scope_note_links(self, notes: list[dict[str, Any]]) -> None:
         if not self.server.project and not self.server.search:
             return
@@ -424,7 +575,9 @@ class PanelHandler(BaseHTTPRequestHandler):
             note["source_available"] = note["source_available"] and note["session_id"] in visible
 
     def save_workspace_data(self, payload: Any) -> None:
-        workspace = self.server.ready_workspace()
+        workspace = self.server.workspace
+        if workspace is None:
+            raise ValueError("This feature requires a local workspace")
         if not isinstance(payload, dict):
             raise ValueError("Invalid workspace data")
         if self.path == "/api/reviews":

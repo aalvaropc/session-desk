@@ -3,6 +3,7 @@ from __future__ import annotations
 import collections
 import datetime
 from pathlib import Path
+from typing import Callable
 
 from ..models import Message
 from .common import timestamp
@@ -32,7 +33,13 @@ def load_codex_messages(path) -> list[Message]:
     return messages or events
 
 
-def extract_codex(path, grep=None):
+def extract_codex(
+    path,
+    grep=None,
+    *,
+    dialogue: list[Message] | None = None,
+    checkpoint: Callable[[], None] | None = None,
+):
     from .common import readable, records, snippet, text_content
 
     path = Path(path)
@@ -41,8 +48,9 @@ def extract_codex(path, grep=None):
     events: collections.deque[dict[str, str]] = collections.deque(maxlen=10)
     first = event_first = match = event_match = ""
     count = event_count = 0
+    event_dialogue: list[Message] = []
     activity = 0.0
-    for obj in records(path):
+    for obj in records(path, checkpoint=checkpoint):
         payload = obj.get("payload")
         if not isinstance(payload, dict):
             continue
@@ -55,6 +63,8 @@ def extract_codex(path, grep=None):
             if role not in ("user", "assistant") or not readable(text):
                 continue
             count += 1
+            if dialogue is not None:
+                dialogue.append({"role": role, "text": text.replace("\r", "")})
             activity = max(activity, timestamp(obj.get("timestamp")))
             if role == "user" and not first:
                 first = text
@@ -67,12 +77,21 @@ def extract_codex(path, grep=None):
                 continue
             role = "u" if payload["type"] == "user_message" else "a"
             event_count += 1
+            if dialogue is not None and not count:
+                event_dialogue.append(
+                    {
+                        "role": "user" if role == "u" else "assistant",
+                        "text": text.strip().replace("\r", ""),
+                    }
+                )
             activity = max(activity, timestamp(obj.get("timestamp")))
             if role == "u" and not event_first:
                 event_first = text
             events.append({"r": role, "t": text[:600]})
             if grep and not event_match:
                 event_match = snippet(text, grep)
+    if dialogue is not None and not count:
+        dialogue.extend(event_dialogue)
     sid = meta.get("id") or meta.get("session_id")
     if not isinstance(sid, str) or not sid:
         raise ValueError("Transcript de Codex sin identificador")

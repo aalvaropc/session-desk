@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import datetime
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from ..models import Memory, Message, Session
-from ..providers.antigravity import discover, read_steps
+from ..providers.antigravity import AntigravitySource, discover, inspect_source, read_steps
 from ..providers.codex import extract_codex
 
 
@@ -15,8 +16,17 @@ class Catalog:
         self.state = state
         self.index = index
 
-    def scan(self, grep: Optional[str] = None, *, previews: bool = True) -> list[Session]:
-        from ..providers.claude import extract, load_history
+    def scan(
+        self,
+        grep: Optional[str] = None,
+        *,
+        previews: bool = True,
+        known: dict[str, Session] | None = None,
+        consume: Callable[[Session, list[Message], float], None] | None = None,
+        checkpoint: Callable[[], None] | None = None,
+        recent_first: bool = False,
+    ) -> list[Session]:
+        from ..providers.claude import extract, load_history, verified_project_path
 
         self.state.warnings = []
         try:
@@ -30,15 +40,83 @@ class Catalog:
         except (sqlite3.Error, ValueError, OSError) as error:
             self.state.warn("codex_index", error)
         rows, registry, fingerprints, cache, index_paths = [], {}, {}, {}, {}
-        paths = [("claude", p) for p in self.state.roots["claude"].glob("projects/*/*.jsonl")]
+        paths: list[tuple[str, Path, AntigravitySource | None]] = [
+            ("claude", path, None) for path in self.state.roots["claude"].glob("projects/*/*.jsonl")
+        ]
         for sub in ("sessions", "archived_sessions"):
-            paths.extend(("codex", p) for p in (self.state.roots["codex"] / sub).rglob("*.jsonl"))
-        for provider, path in paths:
+            paths.extend(
+                ("codex", path, None) for path in (self.state.roots["codex"] / sub).rglob("*.jsonl")
+            )
+        paths.extend(("antigravity", item.path, item) for item in discover(self.state))
+        if recent_first:
+            paths.sort(key=lambda entry: self.modified_time(entry[1]), reverse=True)
+        for provider, path, item in paths:
+            if checkpoint is not None:
+                checkpoint()
+            if item is not None:
+                parsed = inspect_source(
+                    self.state,
+                    item,
+                    grep,
+                    previews=previews,
+                    known=known,
+                    index_messages=consume is not None,
+                    checkpoint=checkpoint,
+                )
+                if parsed is not None:
+                    row, messages, latest, changed = parsed
+                    if consume is not None and changed:
+                        consume(row, messages, latest)
+                    registry[row.id] = row
+                    rows.append(row)
+                    if row.file_path in self.state.cache:
+                        cache[row.file_path] = self.state.cache[row.file_path]
+                continue
             try:
                 self.state.safe(path, self.state.roots[provider])
                 before = self.state.fingerprint(path)
+                version = ":".join(map(str, before))
+                identifier = self.state.identifier(provider, path)
+                previous = (known or {}).get(identifier)
+                reusable = (
+                    previous
+                    if previous is not None
+                    and previous.version == version
+                    and not grep
+                    and (provider != "codex" or previous.source_branch is not None)
+                    else None
+                )
+                if reusable is not None:
+                    row = replace(reusable, match="", messages=[])
+                    if provider == "claude":
+                        row.project_path = verified_project_path(row.project_path, path.parent)
+                    if provider == "codex":
+                        idx = metadata.get(row.session_id, {})
+                        title, branch, indexed_path = self.codex_fields(idx, row.source_branch)
+                        row.title, row.branch = title, branch
+                        index_paths[row.id] = indexed_path
+                    registry[row.id] = row
+                    fingerprints[row.id] = before
+                    rows.append(row)
+                    continue
+
+                dialogue: list[Message] = []
+                changed = previous is None or previous.version != version
                 cached = self.state.cache.get(str(path))
-                if cached and cached[0] == before and cached[1] == grep:
+                if consume is not None and changed:
+                    raw = (
+                        extract(
+                            str(path),
+                            hist,
+                            grep,
+                            dialogue=dialogue,
+                            previews=previews,
+                            checkpoint=checkpoint,
+                        )
+                        if provider == "claude"
+                        else extract_codex(path, grep, dialogue=dialogue, checkpoint=checkpoint)
+                    )
+                elif cached and cached[0] == before and cached[1] == grep:
                     raw = dict(cached[2])
                 else:
                     raw = (
@@ -46,26 +124,30 @@ class Catalog:
                         if provider == "claude"
                         else extract_codex(path, grep)
                     )
-                cache[str(path)] = (before, grep, dict(raw))
+                if consume is None or previews:
+                    cache[str(path)] = (before, grep, dict(raw))
                 sid = raw.get("sid", raw["id"])
                 if not isinstance(sid, str):
                     raise ValueError("Identificador de sesión inválido")
+                source_branch = raw["branch"] if isinstance(raw["branch"], str) else ""
                 if provider == "codex":
-                    idx = metadata.get(sid, {})
-                    title = idx.get("title") or idx.get("name") or ""
-                    branch = idx.get("git_branch") or raw["branch"]
-                    raw["title"] = title if isinstance(title, str) else ""
-                    raw["branch"] = branch if isinstance(branch, str) else ""
+                    title, branch, indexed_path = self.codex_fields(
+                        metadata.get(sid, {}), source_branch
+                    )
+                    raw["title"], raw["branch"] = title, branch
+                    index_paths[identifier] = indexed_path
                 for key in ("title", "first", "proj", "branch", "match"):
                     if not isinstance(raw[key], str):
                         raw[key] = ""
 
+                if provider == "claude":
+                    raw["proj"] = verified_project_path(raw["proj"], path.parent)
+
                 if before != self.state.fingerprint(path):
                     self.state.warn("changed_during_scan", "File changed during scan", path)
                     continue
-                version = ":".join(map(str, before))
                 row = Session(
-                    self.state.identifier(provider, path),
+                    identifier,
                     sid,
                     provider,
                     raw["title"],
@@ -89,29 +171,42 @@ class Catalog:
                     raw["match"],
                     version,
                     activity_source="recorded" if raw.get("activity") else "file",
+                    source_branch=source_branch,
                 )
-                if provider == "codex":
-                    indexed_path = metadata.get(sid, {}).get("rollout_path")
-                    index_paths[row.id] = indexed_path if isinstance(indexed_path, str) else None
-                registry[row.id] = row
-                fingerprints[row.id] = before
-                rows.append(row)
             except (OSError, ValueError, TypeError) as error:
                 self.state.warn("session_read", error, path)
+                continue
+            if consume is not None and changed:
+                consume(row, dialogue, 0.0)
+            registry[row.id] = row
+            fingerprints[row.id] = before
+            rows.append(row)
         self.state.registry = {
             key: value for key, value in self.state.registry.items() if isinstance(value, Memory)
         }
-        antigravity = discover(self.state, grep, previews=previews)
-        for row in antigravity:
-            registry[row.id] = row
-            if row.file_path in self.state.cache:
-                cache[row.file_path] = self.state.cache[row.file_path]
-        rows.extend(antigravity)
         self.state.registry.update(registry)
         self.state.fingerprints.update(fingerprints)
         self.state.cache = cache
         self.state.index_paths = index_paths
         return sorted(rows, key=lambda row: row.timestamp, reverse=True)
+
+    @staticmethod
+    def modified_time(path: Path) -> int:
+        try:
+            return path.lstat().st_mtime_ns
+        except OSError:
+            return 0
+
+    @staticmethod
+    def codex_fields(idx: dict, source_branch: str | None) -> tuple[str, str, str | None]:
+        title = idx.get("title") or idx.get("name")
+        branch = idx.get("git_branch") or source_branch
+        path = idx.get("rollout_path")
+        return (
+            title if isinstance(title, str) else "",
+            branch if isinstance(branch, str) else "",
+            path if isinstance(path, str) else None,
+        )
 
     def conversation(self, identifier: str) -> tuple[list[Message], float]:
         from ..providers.claude import load_messages

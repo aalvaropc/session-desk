@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Mapping, Optional, Sequence, Union
+from typing import Callable, Mapping, Optional, Sequence, Union
 
 from .models import BatchResult, Memory, Message, ScanWarning, Session, TrashEntry
 from .providers.codex import extract_codex
@@ -38,8 +38,24 @@ class SessionStore:
     def warnings(self) -> list[ScanWarning]:
         return self._state.warnings
 
-    def scan(self, grep: Optional[str] = None, *, previews: bool = True) -> list[Session]:
-        return self._catalog.scan(grep, previews=previews)
+    def scan(
+        self,
+        grep: Optional[str] = None,
+        *,
+        previews: bool = True,
+        known: dict[str, Session] | None = None,
+        consume: Callable[[Session, list[Message], float], None] | None = None,
+        checkpoint: Callable[[], None] | None = None,
+        recent_first: bool = False,
+    ) -> list[Session]:
+        return self._catalog.scan(
+            grep,
+            previews=previews,
+            known=known,
+            consume=consume,
+            checkpoint=checkpoint,
+            recent_first=recent_first,
+        )
 
     def memories(self) -> list[Memory]:
         return self._catalog.memories()
