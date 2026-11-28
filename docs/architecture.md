@@ -80,7 +80,10 @@ changes in browser memory. The frontend build is a development step.
 The saved catalog and readable messages are available at startup. On a persistent
 workspace, a background connection checks fingerprints, reads each changed transcript
 once, and publishes an atomic SQLite snapshot. WAL lets readers continue using the
-previous snapshot until publication. Edits to reviews, notes and provider files wait
+previous snapshot until publication. The initial import orders providers' candidates
+by transcript modification time and publishes the first session and subsequent batches
+as they are indexed. A marker persists until the last transaction, so an interrupted
+initial import resumes from the saved batches. Edits to reviews, notes and provider files wait
 for the background update to finish. The panel reports progress and offers a retry if
 the scan fails. An explicit launch filter using `--grep` loads synchronously to keep
 the results scoped to that query. Recoverable trash and restore update the index. Connections with FTS5 trigram use it to narrow literal substring searches;

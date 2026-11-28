@@ -32,6 +32,7 @@ const en = {
   scanningHistory:
     "Scanning local history. The first scan can take a few minutes.",
   indexingHistory: "Indexing conversations",
+  sessionsAvailable: "sessions available to search",
   indexFailed: "Could not update the history. Use Refresh to try again.",
   noteSaved: "Note saved",
   noActivity: "No sessions in this period.",
@@ -192,6 +193,7 @@ const es: Record<TextKey, string> = {
   scanningHistory:
     "Leyendo el historial local. La primera lectura puede tardar unos minutos.",
   indexingHistory: "Indexando conversaciones",
+  sessionsAvailable: "sesiones disponibles para buscar",
   indexFailed:
     "No se pudo actualizar el historial. Pulsa Actualizar para reintentar.",
   noteSaved: "Nota guardada",

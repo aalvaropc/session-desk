@@ -3,6 +3,7 @@ from __future__ import annotations
 import collections
 import datetime
 import os
+from pathlib import Path
 from typing import Callable
 
 from ..models import Message
@@ -168,6 +169,13 @@ def mem_origin(meta: dict) -> str:
 def slug_to_path_guess(slug_dir: str) -> str:
     base = os.path.basename(slug_dir)
     return base.replace("-", "/") if base.startswith("-") else base
+
+
+def verified_project_path(value: str, folder: Path) -> str:
+    if value != folder.name:
+        return value
+    candidate = Path(slug_to_path_guess(value))
+    return str(candidate) if candidate.is_absolute() and candidate.is_dir() else value
 
 
 def _meta_str(meta: dict, key: str) -> str:

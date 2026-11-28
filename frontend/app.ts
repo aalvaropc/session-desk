@@ -20,6 +20,7 @@ import {
   filterSessions,
   isInteractive,
   persist,
+  projectContains,
   readPreference,
   readReview,
   stale,
@@ -139,7 +140,8 @@ function visibleItems(): (Session | Memory | TrashEntry)[] {
     .filter(
       (item) =>
         (filters.provider === "all" || item.provider === filters.provider) &&
-        (!filters.project || item.project_path === filters.project) &&
+        (!filters.project ||
+          projectContains(filters.project, item.project_path)) &&
         (age === "all" || (age === "stale") === isStale(item)) &&
         `${item.name} ${item.description} ${item.body} ${item.project_path}`
           .toLocaleLowerCase()
@@ -529,6 +531,9 @@ async function api(path: string, body?: unknown): Promise<unknown> {
 }
 async function refresh(cached = false): Promise<void> {
   const previous = activeSession?.id;
+  const wasMobileDetail = mobileDetail;
+  const previousTab = detailTab;
+  const previousMessage = targetMessage;
   const value = await refreshCatalog(cached);
   if (
     !Array.isArray(value.sessions) ||
@@ -542,7 +547,12 @@ async function refresh(cached = false): Promise<void> {
   if (view === "sessions") {
     await fetchSessions();
     const session = sessionPage?.sessions.find((row) => row.id === previous);
-    if (session) openItem(session.id);
+    if (session) {
+      openItem(session.id, previousMessage);
+      mobileDetail = wasMobileDetail;
+      detailTab = previousTab;
+      render();
+    }
     openFirstSession();
   } else if (view === "activity") {
     await refreshActivity();
@@ -566,10 +576,14 @@ async function monitorBackgroundIndex(): Promise<void> {
       const state = (await api("/api/progress")) as IndexProgress;
       if (monitor !== indexMonitor) return;
       indexProgress = state;
+      if ((state.revision ?? 0) > (catalog.index_revision ?? 0)) {
+        await refresh(true);
+        return;
+      }
       if (state.phase === "idle") {
         const migrated = await migrateLegacyReviews();
         if (monitor !== indexMonitor) return;
-        if (migrated || (state.revision ?? 0) > (catalog.index_revision ?? 0)) {
+        if (migrated) {
           await refresh(true);
           return;
         }

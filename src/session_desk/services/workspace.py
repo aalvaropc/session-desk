@@ -16,10 +16,27 @@ from ..sessions import SessionStore
 
 PAGE_SIZE = 50
 MESSAGE_PAGE_SIZE = 40
+IMPORT_BATCH_SIZE = 25
+IMPORT_BATCH_SECONDS = 1.0
 
 
 def normalized(text: str) -> str:
     return " ".join(text.casefold().split())
+
+
+def project_contains(project: str, path: str) -> bool:
+    if not path:
+        return False
+    root = os.path.normcase(os.path.normpath(project))
+    candidate = os.path.normcase(os.path.normpath(path))
+    if root == candidate:
+        return True
+    if not os.path.isabs(root) and (root == "." or os.sep not in root):
+        return False
+    try:
+        return os.path.commonpath((root, candidate)) == root
+    except ValueError:
+        return False
 
 
 def workspace_key(store: SessionStore) -> str:
@@ -80,6 +97,7 @@ class Workspace:
                 session_id TEXT PRIMARY KEY,
                 state TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS pending_initial_import (id INTEGER PRIMARY KEY);
             CREATE TABLE IF NOT EXISTS note (
                 id TEXT PRIMARY KEY,
                 session_id TEXT NOT NULL,
@@ -140,6 +158,13 @@ class Workspace:
     def close(self) -> None:
         self.db.close()
 
+    def needs_initial_import(self) -> bool:
+        return (
+            not self.rows
+            or self.db.execute("SELECT 1 FROM pending_initial_import LIMIT 1").fetchone()
+            is not None
+        )
+
     def refresh(
         self,
         *,
@@ -148,21 +173,41 @@ class Workspace:
         progress: Callable[[int, int], None] | None = None,
         checkpoint: Callable[[], None] | None = None,
         publish: Callable[[Workspace, list[Session]], ContextManager[None]] | None = None,
+        publish_partial: Callable[[Workspace], ContextManager[None]] | None = None,
     ) -> None:
         known = {item["id"]: item for item in self.db.execute("SELECT * FROM indexed_session")}
         snapshots = self.snapshots(known)
         processed = 0
+        published = dict(snapshots)
+        pending = 0
+        last_publish = time.monotonic()
+        progressive = publish_partial if self.needs_initial_import() else None
 
         def consume(row: Session, messages: list[Message], latest: float) -> None:
-            nonlocal processed
+            nonlocal processed, pending, last_publish
             if checkpoint is not None:
                 checkpoint()
             self.write_session(row, messages, latest)
             processed += 1
+            if progressive is not None:
+                published[row.id] = row
+                pending += 1
+                if (
+                    processed == 1
+                    or pending >= IMPORT_BATCH_SIZE
+                    or time.monotonic() - last_publish >= IMPORT_BATCH_SECONDS
+                ):
+                    with progressive(self):
+                        self.db.commit()
+                        self.rows = dict(published)
+                    pending = 0
+                    last_publish = time.monotonic()
             if progress is not None:
                 progress(processed, 0)
 
         with self.db:
+            if progressive is not None:
+                self.db.execute("INSERT OR IGNORE INTO pending_initial_import VALUES (1)")
             rows = {
                 row.id: row
                 for row in self.store.scan(
@@ -171,6 +216,7 @@ class Workspace:
                     known={} if rebuild else snapshots,
                     consume=consume,
                     checkpoint=checkpoint,
+                    recent_first=progressive is not None,
                 )
             }
             unstable = {
@@ -203,6 +249,7 @@ class Workspace:
                 progress(len(rows), len(rows))
             if checkpoint is not None:
                 checkpoint()
+            self.db.execute("DELETE FROM pending_initial_import")
             with publish(self, list(rows.values())) if publish is not None else nullcontext():
                 self.db.commit()
                 self.rows = rows
@@ -281,7 +328,7 @@ class Workspace:
             row
             for row in available
             if (provider == "all" or row.provider == provider)
-            and (not project or row.project_path == project)
+            and (not project or project_contains(project, row.project_path))
             and (review == "all" or reviews.get(row.id, "pending") == review)
         ]
         hits = self.hits(needle) if needle and rows else {}

@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from ..models import Memory, Message, Session
-from ..providers.antigravity import discover, read_steps
+from ..providers.antigravity import AntigravitySource, discover, inspect_source, read_steps
 from ..providers.codex import extract_codex
 
 
@@ -24,8 +24,9 @@ class Catalog:
         known: dict[str, Session] | None = None,
         consume: Callable[[Session, list[Message], float], None] | None = None,
         checkpoint: Callable[[], None] | None = None,
+        recent_first: bool = False,
     ) -> list[Session]:
-        from ..providers.claude import extract, load_history
+        from ..providers.claude import extract, load_history, verified_project_path
 
         self.state.warnings = []
         try:
@@ -39,12 +40,38 @@ class Catalog:
         except (sqlite3.Error, ValueError, OSError) as error:
             self.state.warn("codex_index", error)
         rows, registry, fingerprints, cache, index_paths = [], {}, {}, {}, {}
-        paths = [("claude", p) for p in self.state.roots["claude"].glob("projects/*/*.jsonl")]
+        paths: list[tuple[str, Path, AntigravitySource | None]] = [
+            ("claude", path, None) for path in self.state.roots["claude"].glob("projects/*/*.jsonl")
+        ]
         for sub in ("sessions", "archived_sessions"):
-            paths.extend(("codex", p) for p in (self.state.roots["codex"] / sub).rglob("*.jsonl"))
-        for provider, path in paths:
+            paths.extend(
+                ("codex", path, None) for path in (self.state.roots["codex"] / sub).rglob("*.jsonl")
+            )
+        paths.extend(("antigravity", item.path, item) for item in discover(self.state))
+        if recent_first:
+            paths.sort(key=lambda entry: self.modified_time(entry[1]), reverse=True)
+        for provider, path, item in paths:
             if checkpoint is not None:
                 checkpoint()
+            if item is not None:
+                parsed = inspect_source(
+                    self.state,
+                    item,
+                    grep,
+                    previews=previews,
+                    known=known,
+                    index_messages=consume is not None,
+                    checkpoint=checkpoint,
+                )
+                if parsed is not None:
+                    row, messages, latest, changed = parsed
+                    if consume is not None and changed:
+                        consume(row, messages, latest)
+                    registry[row.id] = row
+                    rows.append(row)
+                    if row.file_path in self.state.cache:
+                        cache[row.file_path] = self.state.cache[row.file_path]
+                continue
             try:
                 self.state.safe(path, self.state.roots[provider])
                 before = self.state.fingerprint(path)
@@ -61,6 +88,8 @@ class Catalog:
                 )
                 if reusable is not None:
                     row = replace(reusable, match="", messages=[])
+                    if provider == "claude":
+                        row.project_path = verified_project_path(row.project_path, path.parent)
                     if provider == "codex":
                         idx = metadata.get(row.session_id, {})
                         title, branch, indexed_path = self.codex_fields(idx, row.source_branch)
@@ -111,6 +140,9 @@ class Catalog:
                     if not isinstance(raw[key], str):
                         raw[key] = ""
 
+                if provider == "claude":
+                    raw["proj"] = verified_project_path(raw["proj"], path.parent)
+
                 if before != self.state.fingerprint(path):
                     self.state.warn("changed_during_scan", "File changed during scan", path)
                     continue
@@ -152,19 +184,18 @@ class Catalog:
         self.state.registry = {
             key: value for key, value in self.state.registry.items() if isinstance(value, Memory)
         }
-        antigravity = discover(
-            self.state, grep, previews=previews, known=known, consume=consume, checkpoint=checkpoint
-        )
-        for row in antigravity:
-            registry[row.id] = row
-            if row.file_path in self.state.cache:
-                cache[row.file_path] = self.state.cache[row.file_path]
-        rows.extend(antigravity)
         self.state.registry.update(registry)
         self.state.fingerprints.update(fingerprints)
         self.state.cache = cache
         self.state.index_paths = index_paths
         return sorted(rows, key=lambda row: row.timestamp, reverse=True)
+
+    @staticmethod
+    def modified_time(path: Path) -> int:
+        try:
+            return path.lstat().st_mtime_ns
+        except OSError:
+            return 0
 
     @staticmethod
     def codex_fields(idx: dict, source_branch: str | None) -> tuple[str, str, str | None]:

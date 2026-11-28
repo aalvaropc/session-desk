@@ -5,8 +5,9 @@ import json
 import re
 import sqlite3
 from contextlib import closing
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable, Iterator
 from urllib.parse import urlsplit
 from urllib.request import url2pathname
 
@@ -69,16 +70,18 @@ def summaries(path: Path) -> dict[str, sqlite3.Row]:
         }
 
 
-def discover(
-    state,
-    grep: str | None = None,
-    *,
-    previews: bool = True,
-    known: dict[str, Session] | None = None,
-    consume: Callable[[Session, list[Message], float], None] | None = None,
-    checkpoint: Callable[[], None] | None = None,
-) -> list[Session]:
-    sessions = []
+@dataclass(frozen=True)
+class AntigravitySource:
+    path: Path
+    root: Path
+    variant: str
+    session_id: str
+    info: dict[str, Any]
+    transcript: bool
+    has_file: bool
+
+
+def discover(state) -> Iterator[AntigravitySource]:
     home = state.roots["antigravity"]
     for variant, directory in VARIANTS.items():
         root = home / directory
@@ -102,79 +105,95 @@ def discover(
             if path.suffix in (".db", ".pb") and NATIVE_ID.fullmatch(path.stem)
         }
         for sid in sorted(folders.keys() | metadata.keys() | opaque.keys()):
-            if checkpoint is not None:
-                checkpoint()
             logs = folders.get(sid)
             transcript = next(
                 (logs / name for name in TRANSCRIPTS if logs and (logs / name).is_file()), None
             )
             info = dict(metadata[sid]) if sid in metadata else {}
-            source = transcript or opaque.get(sid) or database
-            try:
-                state.safe(source, home)
-                fingerprint = state.fingerprint(source)
-                version = ":".join(map(str, fingerprint)) + ":" + source.name
-                identifier = state.identifier("antigravity", root / "brain" / sid)
-                previous = (known or {}).get(identifier)
-                changed = previous is None or previous.version != version
-                cache_key = str(source)
-                cached = state.cache.get(cache_key) if transcript and (previews or grep) else None
-                if cached and cached[0] == fingerprint:
-                    messages, latest = cached[2]
-                elif transcript and (previews or grep or (consume is not None and changed)):
-                    messages, latest = read_steps(transcript, checkpoint=checkpoint)
-                    if state.fingerprint(source) != fingerprint:
-                        state.warn("changed_during_scan", "File changed during scan", source)
-                        continue
-                    if previews and consume is None:
-                        state.cache[cache_key] = (fingerprint, None, (messages, latest))
-                else:
-                    messages, latest = [], 0.0
-                first = next(
-                    (message["text"] for message in messages if message["role"] == "user"), ""
-                )
-                observed = max(latest, timestamp(info.get("last_modified_time")))
-                modified = observed or fingerprint[2] / 1_000_000_000
-                title = info.get("title")
-                preview = info.get("preview")
-                hit = next(
-                    (
-                        result
-                        for message in messages
-                        if grep and (result := snippet(message["text"], grep))
-                    ),
-                    "",
-                )
-                session = Session(
-                    id=identifier,
-                    session_id=sid,
-                    provider="antigravity",
-                    title=title[:300] if isinstance(title, str) else "",
-                    first_message=(first or (preview if isinstance(preview, str) else ""))[:300],
-                    project_path=project_path(info.get("workspace_uris")),
-                    file_path=str(source),
-                    branch="",
-                    updated_at=datetime.datetime.fromtimestamp(modified).astimezone().isoformat(),
-                    timestamp=int(modified),
-                    size_bytes=fingerprint[1] if transcript or sid in opaque else 0,
-                    message_count=len(messages) if transcript and (previews or grep) else None,
-                    prompt_count=sum(message["role"] == "user" for message in messages)
-                    if transcript and (previews or grep)
-                    else None,
-                    messages=[
-                        {"role": message["role"], "text": message["text"][:600]}
-                        for message in (messages[-10:] if previews else [])
-                    ],
-                    match=hit,
-                    version=version,
-                    variant=variant,
-                    has_transcript=transcript is not None,
-                    activity_source="recorded" if observed else "file",
-                )
-            except (OSError, ValueError) as error:
-                state.warn("antigravity_read", error, source)
-                continue
-            if changed and consume is not None:
-                consume(session, messages, latest)
-            sessions.append(session)
-    return sessions
+            yield AntigravitySource(
+                transcript or opaque.get(sid) or database,
+                root,
+                variant,
+                sid,
+                info,
+                transcript is not None,
+                transcript is not None or sid in opaque,
+            )
+
+
+def inspect_source(
+    state,
+    item: AntigravitySource,
+    grep: str | None,
+    *,
+    previews: bool,
+    known: dict[str, Session] | None,
+    index_messages: bool,
+    checkpoint: Callable[[], None] | None,
+) -> tuple[Session, list[Message], float, bool] | None:
+    source, root, variant, sid, info = (
+        item.path,
+        item.root,
+        item.variant,
+        item.session_id,
+        item.info,
+    )
+    try:
+        state.safe(source, state.roots["antigravity"])
+        fingerprint = state.fingerprint(source)
+        version = ":".join(map(str, fingerprint)) + ":" + source.name
+        identifier = state.identifier("antigravity", root / "brain" / sid)
+        previous = (known or {}).get(identifier)
+        changed = previous is None or previous.version != version
+        cache_key = str(source)
+        cached = state.cache.get(cache_key) if item.transcript and (previews or grep) else None
+        if cached and cached[0] == fingerprint:
+            messages, latest = cached[2]
+        elif item.transcript and (previews or grep or (index_messages and changed)):
+            messages, latest = read_steps(source, checkpoint=checkpoint)
+            if state.fingerprint(source) != fingerprint:
+                state.warn("changed_during_scan", "File changed during scan", source)
+                return None
+            if previews and not index_messages:
+                state.cache[cache_key] = (fingerprint, None, (messages, latest))
+        else:
+            messages, latest = [], 0.0
+        first = next((message["text"] for message in messages if message["role"] == "user"), "")
+        observed = max(latest, timestamp(info.get("last_modified_time")))
+        modified = observed or fingerprint[2] / 1_000_000_000
+        title = info.get("title")
+        preview = info.get("preview")
+        hit = next(
+            (result for message in messages if grep and (result := snippet(message["text"], grep))),
+            "",
+        )
+        session = Session(
+            id=identifier,
+            session_id=sid,
+            provider="antigravity",
+            title=title[:300] if isinstance(title, str) else "",
+            first_message=(first or (preview if isinstance(preview, str) else ""))[:300],
+            project_path=project_path(info.get("workspace_uris")),
+            file_path=str(source),
+            branch="",
+            updated_at=datetime.datetime.fromtimestamp(modified).astimezone().isoformat(),
+            timestamp=int(modified),
+            size_bytes=fingerprint[1] if item.has_file else 0,
+            message_count=len(messages) if item.transcript and (previews or grep) else None,
+            prompt_count=sum(message["role"] == "user" for message in messages)
+            if item.transcript and (previews or grep)
+            else None,
+            messages=[
+                {"role": message["role"], "text": message["text"][:600]}
+                for message in (messages[-10:] if previews else [])
+            ],
+            match=hit,
+            version=version,
+            variant=variant,
+            has_transcript=item.transcript,
+            activity_source="recorded" if observed else "file",
+        )
+    except (OSError, ValueError) as error:
+        state.warn("antigravity_read", error, source)
+        return None
+    return session, messages, latest, changed

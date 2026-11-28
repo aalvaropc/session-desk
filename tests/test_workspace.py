@@ -1,8 +1,9 @@
 import json
+import os
 import sqlite3
 import tempfile
 import unittest
-from contextlib import closing
+from contextlib import closing, contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -198,3 +199,63 @@ class WorkspaceTests(unittest.TestCase):
                 workspace.refresh()
                 self.assertEqual(reads.call_count, 1)
                 self.assertEqual(workspace.page(query="second")["total"], 1)
+
+    def test_initial_import_publishes_newest_then_resumes_from_the_saved_batch(self):
+        from session_desk.providers import common
+        from session_desk.services.workspace import Workspace
+
+        project = self.root / "claude" / "projects" / "sample"
+        project.mkdir(parents=True)
+        for filename, modified in (("old", 1000000000), ("new", 1000000001)):
+            path = project / f"{filename}.jsonl"
+            path.write_text(
+                json.dumps({"type": "user", "message": {"content": f"{filename} message"}}) + "\n",
+                encoding="utf-8",
+            )
+            os.utime(path, (modified, modified))
+        index = self.root / "progressive.sqlite3"
+
+        @contextmanager
+        def interrupt_after_first_batch(workspace):
+            yield
+            self.assertEqual(workspace.page(query="new message")["total"], 1)
+            self.assertEqual(workspace.page(query="old message")["total"], 0)
+            raise InterruptedError
+
+        with Workspace(self.store, index) as workspace:
+            with self.assertRaises(InterruptedError):
+                workspace.refresh(publish_partial=interrupt_after_first_batch)
+
+        with Workspace(self.store, index) as workspace:
+            self.assertTrue(workspace.needs_initial_import())
+            self.assertEqual(workspace.page(query="new message")["total"], 1)
+            with patch.object(common, "records", wraps=common.records) as reads:
+                workspace.refresh()
+                self.assertEqual(reads.call_count, 1)
+            self.assertEqual(workspace.page(query="old message")["total"], 1)
+            self.assertFalse(workspace.needs_initial_import())
+
+    def test_project_filter_includes_descendants_and_recovers_a_claude_folder_without_cwd(self):
+        from session_desk.services.workspace import Workspace
+
+        project = self.root / "SamurAI"
+        project.mkdir()
+        bucket = self.root / "claude" / "projects" / "-synthetic-SamurAI"
+        bucket.mkdir(parents=True)
+        for filename, path in (
+            ("root", None),
+            ("worktree", project / "worktrees" / "feature"),
+            ("sibling", project.with_name("SamurAI-archive")),
+        ):
+            record = {"type": "user", "message": {"content": filename}}
+            if path is not None:
+                record["cwd"] = str(path)
+            (bucket / f"{filename}.jsonl").write_text(json.dumps(record) + "\n", encoding="utf-8")
+        index = self.root / "project-test.sqlite3"
+        with Workspace(self.store, index) as workspace:
+            workspace.refresh()
+        with patch("session_desk.providers.claude.slug_to_path_guess", return_value=str(project)):
+            with Workspace(self.store, index) as workspace:
+                workspace.refresh()
+                results = workspace.page(project=str(project))["sessions"]
+                self.assertEqual({row["session_id"] for row in results}, {"root", "worktree"})

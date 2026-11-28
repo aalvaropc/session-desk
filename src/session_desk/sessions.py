@@ -46,9 +46,15 @@ class SessionStore:
         known: dict[str, Session] | None = None,
         consume: Callable[[Session, list[Message], float], None] | None = None,
         checkpoint: Callable[[], None] | None = None,
+        recent_first: bool = False,
     ) -> list[Session]:
         return self._catalog.scan(
-            grep, previews=previews, known=known, consume=consume, checkpoint=checkpoint
+            grep,
+            previews=previews,
+            known=known,
+            consume=consume,
+            checkpoint=checkpoint,
+            recent_first=recent_first,
         )
 
     def memories(self) -> list[Memory]:

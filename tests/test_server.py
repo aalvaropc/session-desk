@@ -218,6 +218,57 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(json.loads(body)["code"], "index_not_ready")
         self.assertTrue(path.exists())
 
+    def test_empty_workspace_serves_search_results_before_import_finishes(self):
+        import os
+        from pathlib import Path
+
+        from session_desk.services.workspace import Workspace
+
+        folder = Path(self.claude) / "projects" / "sample"
+        folder.mkdir(parents=True)
+        for identifier, modified in (("old", 1000000000), ("recent", 1000000001)):
+            path = folder / f"{identifier}.jsonl"
+            path.write_text(
+                json.dumps({"type": "user", "message": {"content": f"{identifier} transcript"}})
+                + "\n",
+                encoding="utf-8",
+            )
+            os.utime(path, (modified, modified))
+        self.start_server(Path(self.claude).parent / "progressive.sqlite3")
+        entered = threading.Event()
+        release = threading.Event()
+        write = Workspace.write_session
+
+        def pause_before_old_file(workspace, row, *args):
+            if row.session_id == "old":
+                entered.set()
+                if not release.wait(6):
+                    raise RuntimeError("Did not release the older transcript")
+            return write(workspace, row, *args)
+
+        with patch.object(Workspace, "write_session", pause_before_old_file):
+            try:
+                self.assertEqual(
+                    self.request("GET", "/api/catalog?cached=1", headers=self.headers())[0], 200
+                )
+                self.assertTrue(entered.wait(3))
+                status, body = self.request(
+                    "GET", "/api/search?q=recent%20transcript", headers=self.headers()
+                )
+                self.assertEqual(status, 200)
+                self.assertEqual(json.loads(body)["total"], 1)
+                status, body = self.request("GET", "/api/progress", headers=self.headers())
+                self.assertEqual(status, 200)
+                progress = json.loads(body)
+                self.assertEqual(progress["phase"], "index")
+                self.assertEqual(progress["available"], 1)
+            finally:
+                release.set()
+        self.server.index_thread.join(timeout=4)
+        status, body = self.request("GET", "/api/sessions", headers=self.headers())
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["catalog_total"], 2)
+
     def test_http_trash_restore_and_stale_snapshot(self):
         path = claude_session(self.claude)
         self.start_server()

@@ -50,6 +50,7 @@ class PanelServer(ThreadingHTTPServer):
         self.index_thread: threading.Thread | None = None
         self.index_cancelled = threading.Event()
         self.index_revision = 0
+        self.index_ready = False
         self.background_index = index_path if not search and not demo else None
         super().__init__(("127.0.0.1", port), PanelHandler)
         self.store = store
@@ -136,11 +137,13 @@ class PanelServer(ThreadingHTTPServer):
         return library
 
     def report_index_progress(self, completed: int, total: int) -> None:
+        workspace = self.workspace
         self.index_progress = {
             "phase": "index",
             "completed": completed,
             "total": total,
             "revision": self.index_revision,
+            "available": len(workspace.rows) if workspace is not None else 0,
         }
 
     def check_index_cancelled(self) -> None:
@@ -166,6 +169,7 @@ class PanelServer(ThreadingHTTPServer):
                     progress=self.report_index_progress,
                     checkpoint=self.check_index_cancelled,
                     publish=self.publish_index,
+                    publish_partial=self.publish_partial_index,
                 )
         except IndexCancelled:
             return
@@ -173,6 +177,17 @@ class PanelServer(ThreadingHTTPServer):
             with self.store_lock:
                 if not self.index_cancelled.is_set():
                     self.index_progress = {"phase": "error", "revision": self.index_revision}
+
+    @contextmanager
+    def publish_partial_index(self, candidate: Workspace) -> Iterator[None]:
+        with self.store_lock:
+            self.check_index_cancelled()
+            workspace = self.workspace
+            if workspace is None:
+                raise IndexCancelled
+            yield
+            workspace.rows = candidate.rows
+            self.index_revision += 1
 
     @contextmanager
     def publish_index(self, candidate: Workspace, rows: list[Session]) -> Iterator[None]:
@@ -188,6 +203,7 @@ class PanelServer(ThreadingHTTPServer):
             workspace.rows = candidate.rows
             workspace.library = library
             self.index_revision += 1
+            self.index_ready = True
             self.index_progress = {"phase": "idle", "revision": self.index_revision}
 
     def index_is_running(self) -> bool:
@@ -331,7 +347,12 @@ class PanelHandler(BaseHTTPRequestHandler):
             if self.server.workspace is not None:
                 notes = self.server.workspace.notes()
                 self.scope_note_links(notes)
-                library = {**library, "notes": notes, "index_revision": self.server.index_revision}
+                library = {
+                    **library,
+                    "notes": notes,
+                    "index_revision": self.server.index_revision,
+                    "index_ready": self.server.index_ready,
+                }
             self.reply(200, library)
         elif path == "/api/trash":
             self.reply(200, [entry.to_dict() for entry in self.server.store.list_trash()])
@@ -488,7 +509,7 @@ class PanelHandler(BaseHTTPRequestHandler):
                     return
                 if self.reject_during_index():
                     return
-                if self.server.background_index is not None and not self.server.index_revision:
+                if self.server.background_index is not None and not self.server.index_ready:
                     self.reply(
                         409,
                         {

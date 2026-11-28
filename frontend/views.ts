@@ -90,9 +90,7 @@ export function workspaceMarkup(state: ViewState): string {
   const disabled = (): string =>
     busy || indexing || catalog.mode === "static" ? "disabled" : "";
   const filesDisabled = (): string =>
-    catalog.background_index && !catalog.index_revision
-      ? "disabled"
-      : disabled();
+    catalog.background_index && !catalog.index_ready ? "disabled" : disabled();
   const button = (
     action: string,
     label: string,
@@ -390,7 +388,7 @@ export function workspaceMarkup(state: ViewState): string {
     indexProgress.phase === "scan"
       ? t("scanningHistory")
       : indexProgress.phase === "index"
-        ? `${t("indexingHistory")} · ${indexProgress.completed.toLocaleString(language)}${indexProgress.total ? ` / ${indexProgress.total.toLocaleString(language)}` : ""}`
+        ? `${t("indexingHistory")} · ${indexProgress.completed.toLocaleString(language)}${indexProgress.total ? ` / ${indexProgress.total.toLocaleString(language)}` : ""}${indexProgress.available ? ` · ${indexProgress.available.toLocaleString(language)} ${t("sessionsAvailable")}` : ""}`
         : "";
   const descriptions = {
     sessions: "sessionsDescription",
