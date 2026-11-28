@@ -1,6 +1,12 @@
 export type Provider = "claude" | "codex" | "antigravity";
 export type Review = "keep" | "pending";
 export type View = "sessions" | "memories" | "trash" | "activity";
+export const sessionTabs = [
+  "conversation",
+  "resumeContext",
+  "details",
+] as const;
+export type SessionTab = (typeof sessionTabs)[number];
 export type Language = "en" | "es";
 export interface ChatMessage {
   role: "user" | "assistant";

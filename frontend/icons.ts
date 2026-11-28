@@ -9,6 +9,8 @@ const paths = {
   arrow: '<path d="m9 5 7 7-7 7"/>',
   back: '<path d="m10 5-7 7 7 7M3 12h18"/>',
   close: '<path d="m6 6 12 12M6 18 18 6"/>',
+  expand: '<path d="M9 4H4v5m11-5h5v5M4 15v5h5m11-5v5h-5"/>',
+  contract: '<path d="M4 9h5V4m6 0v5h5M9 20v-5H4m11 5v-5h5"/>',
   copy: '<path d="M8 8h12v13H8zM16 8V3H3v13h5"/>',
   check: '<path d="m5 12 4 4L19 6"/>',
   clock: '<circle cx="12" cy="12" r="9"/><path d="M12 6v6l4 2"/>',
